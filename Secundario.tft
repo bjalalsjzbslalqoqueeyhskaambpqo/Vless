@@ -1,0 +1,542 @@
+#!/bin/bash
+set -e
+
+VLESS_UUID="11111111-1111-1111-1111-111111111111"
+CENTRAL_HOST="central.brawlpass.com.ar"
+CENTRAL_PORT=80
+VPROXY_BIN="/opt/vproxy/bin/vproxy"
+
+menu_main() {
+  while true; do
+    echo ""
+    echo "  ╔═══════════════════════════╗"
+    echo "  ║     BlackTunnel Server    ║"
+    echo "  ╠═══════════════════════════╣"
+    echo "  ║  1. Instalar / Actualizar ║"
+    echo "  ║  2. Reiniciar servicios   ║"
+    echo "  ║  0. Salir                 ║"
+    echo "  ╚═══════════════════════════╝"
+    printf "  › "; read -r op
+    case "$op" in
+      1) do_install ;;
+      2) do_restart ;;
+      0) exit 0 ;;
+    esac
+  done
+}
+
+do_install() {
+  echo ""
+  echo "[*] Dependencias..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y -q
+  apt-get install -y -q -o Dpkg::Options::="--force-confold" gcc curl ca-certificates
+
+  echo "[*] Red BBR..."
+  cat > /etc/sysctl.d/99-bt.conf << 'EOF'
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 131072 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_autocorking=0
+net.core.somaxconn=65535
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=10
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.ip_local_port_range=1024 65535
+EOF
+  sysctl -p /etc/sysctl.d/99-bt.conf 2>/dev/null || true
+  modprobe tcp_bbr 2>/dev/null || true
+
+  echo "[*] sing-box..."
+  if [ ! -f /usr/bin/sing-box ] && [ ! -f /usr/local/bin/sing-box ]; then
+    bash <(curl -fsSL https://sing-box.app/install.sh)
+  else
+    echo "    ya instalado"
+  fi
+
+  mkdir -p /etc/sing-box /opt/vproxy/bin /var/lib/vproxy
+
+  cat > /etc/sing-box/config.json << CFGEOF
+{
+  "log": { "level": "warn" },
+  "inbounds": [{
+    "type": "vless",
+    "listen": "127.0.0.1",
+    "listen_port": 8443,
+    "users": [{"uuid": "${VLESS_UUID}"}],
+    "multiplex": { "enabled": true }
+  }],
+  "outbounds": [{"type": "direct"}]
+}
+CFGEOF
+
+  echo "[*] Compilando vproxy..."
+  cat > /opt/vproxy/vproxy.c << 'CSRC'
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <time.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <sys/epoll.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/timerfd.h>
+
+#define WS_PORT   80
+#define VL_HOST   "127.0.0.1"
+#define VL_PORT   8443
+#define BUF       65536
+#define MAXEV     4096
+#define IDLE_SEC  300
+#define MAXCONNS  8192
+
+static char g_central[256] = "central.brawlpass.com.ar";
+static int  g_central_port = 80;
+static int  g_active = 0;
+static pthread_mutex_t g_alock = PTHREAD_MUTEX_INITIALIZER;
+
+static inline void active_inc(void){ pthread_mutex_lock(&g_alock); g_active++; pthread_mutex_unlock(&g_alock); }
+static inline void active_dec(void){ pthread_mutex_lock(&g_alock); if(g_active>0)g_active--; pthread_mutex_unlock(&g_alock); }
+static inline int  active_get(void){ pthread_mutex_lock(&g_alock); int v=g_active; pthread_mutex_unlock(&g_alock); return v; }
+
+typedef struct cn {
+    int        cfd, tfd, ep, tunneling, is_vside;
+    time_t     la;
+    char       hw[128], hdr[8192];
+    int        hl;
+    struct cn *peer;
+} cn_t;
+
+static cn_t           *g_conns[MAXCONNS];
+static int             g_nconns = 0;
+static pthread_mutex_t g_connlock = PTHREAD_MUTEX_INITIALIZER;
+static void cn_close(cn_t *c);
+
+static void conn_reg(cn_t *c){
+    pthread_mutex_lock(&g_connlock);
+    if(g_nconns<MAXCONNS) g_conns[g_nconns++]=c;
+    pthread_mutex_unlock(&g_connlock);
+}
+static void conn_unreg(cn_t *c){
+    pthread_mutex_lock(&g_connlock);
+    for(int i=0;i<g_nconns;i++) if(g_conns[i]==c){g_conns[i]=g_conns[--g_nconns];break;}
+    pthread_mutex_unlock(&g_connlock);
+}
+
+typedef struct {
+    char   hw[128];
+    cn_t  *conn_main;
+    cn_t  *conn_fast;
+} slot_t;
+
+static slot_t          slots[4096];
+static int             nslots = 0;
+static pthread_mutex_t slotlock = PTHREAD_MUTEX_INITIALIZER;
+
+static slot_t *slot_find(const char *hw){
+    for(int i=0;i<nslots;i++) if(!strcmp(slots[i].hw,hw)) return &slots[i];
+    return NULL;
+}
+
+static cn_t *slot_replace(const char *hw, cn_t *c, int is_fast){
+    pthread_mutex_lock(&slotlock);
+    slot_t *s=slot_find(hw);
+    if(!s && nslots<4096){
+        s=&slots[nslots++];
+        memset(s,0,sizeof(*s));
+        strncpy(s->hw,hw,127);
+    }
+    cn_t *old=NULL;
+    if(s){
+        if(is_fast){ old=s->conn_fast; s->conn_fast=c; }
+        else       { old=s->conn_main; s->conn_main=c; }
+    }
+    pthread_mutex_unlock(&slotlock);
+    return old;
+}
+
+static void slot_remove(const char *hw, cn_t *c){
+    if(!hw||!hw[0]) return;
+    pthread_mutex_lock(&slotlock);
+    slot_t *s=slot_find(hw);
+    if(s){
+        if(s->conn_main==c) s->conn_main=NULL;
+        if(s->conn_fast==c) s->conn_fast=NULL;
+    }
+    pthread_mutex_unlock(&slotlock);
+}
+
+static void fd_nodelay(int fd){
+    int v=1, buf=131072;
+    setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&v,sizeof(v));
+    setsockopt(fd,IPPROTO_TCP,TCP_QUICKACK,&v,sizeof(v));
+    setsockopt(fd,SOL_SOCKET,SO_SNDBUF,&buf,sizeof(buf));
+    setsockopt(fd,SOL_SOCKET,SO_RCVBUF,&buf,sizeof(buf));
+}
+
+static void hget(const char *h, const char *k, char *out, int sz){
+    out[0]=0;
+    const char *p=strcasestr(h,k); if(!p) return;
+    p+=strlen(k); while(*p==' ') p++;
+    int i=0; while(*p&&*p!='\r'&&*p!='\n'&&i<sz-1) out[i++]=*p++;
+    out[i]=0;
+}
+
+static void send101(int fd, const char *extra){
+    char buf[2048];
+    snprintf(buf,sizeof(buf),
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        "%s\r\n", extra?extra:"");
+    send(fd,buf,strlen(buf),MSG_NOSIGNAL);
+}
+
+static void arm_timerfd(cn_t *c){
+    if(c->tfd>=0) return;
+    int tfd=timerfd_create(CLOCK_MONOTONIC,TFD_NONBLOCK|TFD_CLOEXEC);
+    if(tfd<0) return;
+    struct itimerspec it={{0},{IDLE_SEC,0}};
+    timerfd_settime(tfd,0,&it,NULL);
+    struct epoll_event te={.events=EPOLLIN,.data.fd=tfd};
+    epoll_ctl(c->ep,EPOLL_CTL_ADD,tfd,&te);
+    c->tfd=tfd;
+}
+
+static void cn_close(cn_t *c){
+    if(!c) return;
+    if(c->hw[0]) slot_remove(c->hw,c);
+    if(c->peer){ cn_t *p=c->peer; c->peer=NULL; p->peer=NULL; cn_close(p); }
+    conn_unreg(c);
+    if(c->tunneling&&!c->is_vside) active_dec();
+    if(c->tfd>=0){ epoll_ctl(c->ep,EPOLL_CTL_DEL,c->tfd,NULL); close(c->tfd); c->tfd=-1; }
+    if(c->cfd>=0){ epoll_ctl(c->ep,EPOLL_CTL_DEL,c->cfd,NULL); close(c->cfd); c->cfd=-1; }
+    free(c);
+}
+
+static int verify_central(const char *hw, char *out, int outsz){
+    out[0]=0;
+    struct addrinfo hints={0},*res=NULL;
+    hints.ai_socktype=SOCK_STREAM;
+    char port_str[16]; snprintf(port_str,sizeof(port_str),"%d",g_central_port);
+    if(getaddrinfo(g_central,port_str,&hints,&res)!=0) return 0;
+    int fd=-1;
+    for(struct addrinfo *r=res;r;r=r->ai_next){
+        fd=socket(r->ai_family,r->ai_socktype|SOCK_CLOEXEC,r->ai_protocol);
+        if(fd<0) continue;
+        struct timeval tv={5,0};
+        setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));
+        setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));
+        if(connect(fd,r->ai_addr,r->ai_addrlen)==0) break;
+        close(fd); fd=-1;
+    }
+    freeaddrinfo(res);
+    if(fd<0) return 0;
+    char req[512];
+    snprintf(req,sizeof(req),
+        "BT-VERIFY / HTTP/1.1\r\nHost: %s\r\nAuth: %s\r\n\r\n",
+        g_central,hw);
+    send(fd,req,strlen(req),MSG_NOSIGNAL);
+    char buf[4096]={0}; int len=0;
+    while(len<(int)sizeof(buf)-1){
+        ssize_t r=recv(fd,buf+len,sizeof(buf)-1-len,0);
+        if(r<=0) break;
+        len+=r; buf[len]=0;
+        if(strstr(buf,"\r\n\r\n")) break;
+    }
+    close(fd);
+    if(!len) return 0;
+    char status[32]={0};
+    hget(buf,"X-Status:",status,sizeof(status));
+    if(strcasecmp(status,"OK")!=0) return 0;
+    char name[64]={0},expire[32]={0},days[16]={0},premium[4]={0},created[32]={0};
+    hget(buf,"X-Name:",    name,    sizeof(name));
+    hget(buf,"X-Expire:",  expire,  sizeof(expire));
+    hget(buf,"X-Days-Left:",days,   sizeof(days));
+    hget(buf,"X-Premium:", premium, sizeof(premium));
+    hget(buf,"X-Created:", created, sizeof(created));
+    snprintf(out,outsz,
+        "X-Status: OK\r\nX-Name: %s\r\nX-Expire: %s\r\n"
+        "X-Days-Left: %s\r\nX-Premium: %s\r\nX-Created: %s\r\n",
+        name,expire,days,premium,created);
+    return 1;
+}
+
+static void do_tunnel(cn_t *c, int ep, const char *hw, const char *extra, int is_fast){
+    cn_t *old=slot_replace(hw,c,is_fast);
+    if(old&&old!=c){ active_dec(); cn_close(old); }
+    strncpy(c->hw,hw,127);
+    int vfd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
+    fd_nodelay(vfd);
+    struct sockaddr_in vsa={.sin_family=AF_INET,.sin_port=htons(VL_PORT),
+                             .sin_addr.s_addr=inet_addr(VL_HOST)};
+    if(connect(vfd,(struct sockaddr*)&vsa,sizeof(vsa))<0&&errno!=EINPROGRESS){
+        close(vfd); slot_remove(hw,c); c->hw[0]=0;
+        send101(c->cfd,"X-Status: ERROR\r\n"); cn_close(c); return;
+    }
+    char full[600];
+    snprintf(full,sizeof(full),"%sX-Active: %d\r\n",extra,active_get()+1);
+    active_inc();
+    send101(c->cfd,full);
+    cn_t *vconn=calloc(1,sizeof(*vconn));
+    vconn->cfd=vfd; vconn->tfd=-1; vconn->ep=ep;
+    vconn->tunneling=1; vconn->is_vside=1;
+    vconn->la=time(NULL); vconn->peer=c;
+    conn_reg(vconn);
+    c->tunneling=1; c->is_vside=0; c->peer=vconn; c->hl=0;
+    memset(c->hdr,0,sizeof(c->hdr));
+    arm_timerfd(c);
+    struct epoll_event ve={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=vconn};
+    epoll_ctl(ep,EPOLL_CTL_ADD,vfd,&ve);
+    struct epoll_event ce={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=c};
+    epoll_ctl(ep,EPOLL_CTL_MOD,c->cfd,&ce);
+}
+
+int main(void){
+    signal(SIGPIPE,SIG_IGN);
+    FILE *cf=fopen("/var/lib/vproxy/config","r");
+    if(cf){
+        char line[256];
+        while(fgets(line,sizeof(line),cf)){
+            line[strcspn(line,"\r\n")]=0;
+            if(strncmp(line,"CENTRAL=",8)==0)
+                snprintf(g_central,sizeof(g_central),"%s",line+8);
+            else if(strncmp(line,"CENTRAL_PORT=",13)==0)
+                g_central_port=atoi(line+13);
+        }
+        fclose(cf);
+    }
+    int lfd=socket(AF_INET6,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
+    if(lfd<0) lfd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
+    int v=1;
+    setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,&v,sizeof(v));
+    setsockopt(lfd,SOL_SOCKET,SO_REUSEPORT,&v,sizeof(v));
+    struct sockaddr_in6 sa6={.sin6_family=AF_INET6,.sin6_port=htons(WS_PORT),.sin6_addr=in6addr_any};
+    if(bind(lfd,(struct sockaddr*)&sa6,sizeof(sa6))<0){
+        struct sockaddr_in sa4={.sin_family=AF_INET,.sin_port=htons(WS_PORT),.sin_addr.s_addr=INADDR_ANY};
+        bind(lfd,(struct sockaddr*)&sa4,sizeof(sa4));
+    }
+    listen(lfd,65535);
+    int ep=epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event le={.events=EPOLLIN,.data.fd=lfd};
+    epoll_ctl(ep,EPOLL_CTL_ADD,lfd,&le);
+    static char buf[BUF];
+    struct epoll_event evs[MAXEV];
+    for(;;){
+        int n=epoll_wait(ep,evs,MAXEV,5000);
+        time_t now=time(NULL);
+        pthread_mutex_lock(&g_connlock);
+        for(int i=0;i<g_nconns;i++){
+            cn_t *c=g_conns[i];
+            if(c&&c->tunneling&&(now-c->la)>IDLE_SEC){
+                pthread_mutex_unlock(&g_connlock);
+                cn_close(c);
+                pthread_mutex_lock(&g_connlock);
+                i--;
+            }
+        }
+        pthread_mutex_unlock(&g_connlock);
+        for(int i=0;i<n;i++){
+            uint32_t e=evs[i].events;
+            if(evs[i].data.fd==lfd){
+                for(;;){
+                    int cfd=accept4(lfd,NULL,NULL,SOCK_NONBLOCK|SOCK_CLOEXEC);
+                    if(cfd<0) break;
+                    fd_nodelay(cfd);
+                    cn_t *c=calloc(1,sizeof(*c));
+                    c->cfd=cfd; c->tfd=-1; c->ep=ep; c->la=now;
+                    conn_reg(c);
+                    struct epoll_event ce={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=c};
+                    epoll_ctl(ep,EPOLL_CTL_ADD,cfd,&ce);
+                }
+                continue;
+            }
+            int is_timer=0;
+            pthread_mutex_lock(&g_connlock);
+            for(int j=0;j<g_nconns;j++){
+                if(g_conns[j]&&g_conns[j]->tfd==evs[i].data.fd){
+                    cn_t *c=g_conns[j];
+                    pthread_mutex_unlock(&g_connlock);
+                    uint64_t d; read(c->tfd,&d,8);
+                    cn_close(c); is_timer=1; break;
+                }
+            }
+            if(!is_timer) pthread_mutex_unlock(&g_connlock);
+            if(is_timer) continue;
+            cn_t *c=evs[i].data.ptr;
+            if(!c||c->cfd<0) continue;
+            if(e&(EPOLLERR|EPOLLHUP|EPOLLRDHUP)){ cn_close(c); continue; }
+            if(c->tunneling){
+                if(!c->peer||c->peer->cfd<0){ cn_close(c); continue; }
+                int dst=c->peer->cfd;
+                for(;;){
+                    ssize_t r=recv(c->cfd,buf,BUF,0);
+                    if(r>0){
+                        ssize_t s=0;
+                        while(s<r){
+                            ssize_t w=send(dst,buf+s,r-s,MSG_NOSIGNAL);
+                            if(w>0){s+=w;continue;}
+                            if(errno==EAGAIN||errno==EWOULDBLOCK) break;
+                            cn_close(c); goto nxt;
+                        }
+                        c->la=now; if(c->peer) c->peer->la=now;
+                        int qa=1; setsockopt(dst,IPPROTO_TCP,TCP_QUICKACK,&qa,sizeof(qa));
+                        continue;
+                    }
+                    if(r==0){ cn_close(c); goto nxt; }
+                    if(errno==EAGAIN||errno==EWOULDBLOCK) break;
+                    cn_close(c); goto nxt;
+                }
+                goto nxt;
+            }
+            if(!(e&EPOLLIN)) goto nxt;
+            {
+                ssize_t r=recv(c->cfd,c->hdr+c->hl,sizeof(c->hdr)-1-c->hl,0);
+                if(r<=0){ cn_close(c); goto nxt; }
+                c->hl+=r; c->hdr[c->hl]=0;
+                if(!strstr(c->hdr,"\r\n\r\n")&&!strstr(c->hdr,"\n\n")) goto nxt;
+                char action[32]={0},hw[128]={0};
+                hget(c->hdr,"Action:",action,sizeof(action));
+                hget(c->hdr,"Auth:",  hw,    sizeof(hw));
+                if(!hw[0]||!action[0]){ cn_close(c); goto nxt; }
+                for(char *p=hw;*p;p++) if(*p=='/'||*p=='.'||*p==' '){ cn_close(c); goto nxt; }
+                if(!strcasecmp(action,"auth")){
+                    char extra[512]={0};
+                    if(!verify_central(hw,extra,sizeof(extra)))
+                        send101(c->cfd,"X-Status: INVALID\r\n");
+                    else
+                        send101(c->cfd,extra);
+                    cn_close(c); goto nxt;
+                }
+                if(!strcasecmp(action,"tunnel")){
+                    char extra[512]={0};
+                    if(!verify_central(hw,extra,sizeof(extra))){
+                        send101(c->cfd,"X-Status: INVALID\r\n");
+                        cn_close(c); goto nxt;
+                    }
+                    do_tunnel(c,ep,hw,extra,0);
+                    goto nxt;
+                }
+                if(!strcasecmp(action,"tunnel-fast")){
+                    char extra[512]={0};
+                    if(!verify_central(hw,extra,sizeof(extra))){
+                        send101(c->cfd,"X-Status: INVALID\r\n");
+                        cn_close(c); goto nxt;
+                    }
+                    do_tunnel(c,ep,hw,extra,1);
+                    goto nxt;
+                }
+                cn_close(c);
+            }
+            nxt:;
+        }
+    }
+    return 0;
+}
+CSRC
+
+  gcc -O3 -march=native -o "$VPROXY_BIN" /opt/vproxy/vproxy.c -lpthread
+  chmod 755 "$VPROXY_BIN"
+  echo "[✓] vproxy compilado"
+
+  cat > /var/lib/vproxy/config << EOF
+CENTRAL=${CENTRAL_HOST}
+CENTRAL_PORT=${CENTRAL_PORT}
+EOF
+
+  cat > /etc/systemd/system/vproxy.service << EOF
+[Unit]
+Description=BlackTunnel vproxy
+After=network.target sing-box.service
+[Service]
+ExecStart=${VPROXY_BIN}
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  if [ ! -f /etc/systemd/system/sing-box.service ]; then
+    cat > /etc/systemd/system/sing-box.service << 'EOF'
+[Unit]
+Description=sing-box
+After=network.target
+[Service]
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+
+  cat > /etc/systemd/system/bt-watchdog.service << 'EOF'
+[Unit]
+Description=BlackTunnel watchdog
+[Service]
+Type=oneshot
+ExecStart=/opt/vproxy/watchdog.sh
+EOF
+
+  cat > /etc/systemd/system/bt-watchdog.timer << 'EOF'
+[Unit]
+Description=BlackTunnel watchdog
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+[Install]
+WantedBy=timers.target
+EOF
+
+  cat > /opt/vproxy/watchdog.sh << 'EOF'
+#!/bin/bash
+for svc in sing-box vproxy; do
+  systemctl is-active --quiet "$svc" || systemctl restart "$svc"
+done
+EOF
+  chmod +x /opt/vproxy/watchdog.sh
+
+  systemctl daemon-reload
+  systemctl enable sing-box vproxy bt-watchdog.timer
+  systemctl restart sing-box
+  sleep 2
+  systemctl restart vproxy
+  systemctl restart bt-watchdog.timer
+
+  IP=$(hostname -I | awk '{print $1}')
+  echo ""
+  echo "  ════════════════════════════════════"
+  echo "  [✓] BlackTunnel instalado"
+  echo "      IP      : $IP:80"
+  echo "      UUID    : ${VLESS_UUID}"
+  echo "      Central : ${CENTRAL_HOST}:${CENTRAL_PORT}"
+  echo "      idle    : ${IDLE_SEC}s"
+  echo "  ════════════════════════════════════"
+}
+
+do_restart() {
+  systemctl restart sing-box vproxy 2>/dev/null && echo "  [✓] Reiniciados" || echo "  [!] Error"
+}
+
+case "${1:-}" in
+  install) do_install ;;
+  restart) do_restart ;;
+  "")      menu_main ;;
+esac
