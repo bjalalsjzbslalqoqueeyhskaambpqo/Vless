@@ -65,13 +65,19 @@ EOF
 
   mkdir -p /etc/sing-box /opt/vproxy/bin /var/lib/vproxy
 
-  # ── tres instancias sing-box: none(8443) normal(8444) family(8445) ──
-
+  # ── sing-box none :8443 — sin filtros ──────────────────────────
   cat > /etc/sing-box/config-none.json << CFGEOF
 {
   "log": { "level": "warn" },
   "dns": {
-    "servers": [{"address": "94.140.14.140"}]
+    "servers": [
+      {
+        "tag": "dns-none",
+        "address": "https://unfiltered.adguard-dns.com/dns-query",
+        "detour": "direct"
+      }
+    ],
+    "final": "dns-none"
   },
   "inbounds": [{
     "type": "vless",
@@ -80,15 +86,25 @@ EOF
     "users": [{"uuid": "${VLESS_UUID}"}],
     "multiplex": { "enabled": true }
   }],
-  "outbounds": [{"type": "direct"}]
+  "outbounds": [
+    {"type": "direct", "tag": "direct"}
+  ]
 }
 CFGEOF
 
+  # ── sing-box normal :8444 — bloquea ads y tracking ─────────────
   cat > /etc/sing-box/config-normal.json << CFGEOF
 {
   "log": { "level": "warn" },
   "dns": {
-    "servers": [{"address": "94.140.14.14"}]
+    "servers": [
+      {
+        "tag": "dns-normal",
+        "address": "https://dns.adguard-dns.com/dns-query",
+        "detour": "direct"
+      }
+    ],
+    "final": "dns-normal"
   },
   "inbounds": [{
     "type": "vless",
@@ -97,15 +113,25 @@ CFGEOF
     "users": [{"uuid": "${VLESS_UUID}"}],
     "multiplex": { "enabled": true }
   }],
-  "outbounds": [{"type": "direct"}]
+  "outbounds": [
+    {"type": "direct", "tag": "direct"}
+  ]
 }
 CFGEOF
 
+  # ── sing-box family :8445 — bloquea ads + adulto ───────────────
   cat > /etc/sing-box/config-family.json << CFGEOF
 {
   "log": { "level": "warn" },
   "dns": {
-    "servers": [{"address": "94.140.14.15"}]
+    "servers": [
+      {
+        "tag": "dns-family",
+        "address": "https://family.adguard-dns.com/dns-query",
+        "detour": "direct"
+      }
+    ],
+    "final": "dns-family"
   },
   "inbounds": [{
     "type": "vless",
@@ -114,7 +140,9 @@ CFGEOF
     "users": [{"uuid": "${VLESS_UUID}"}],
     "multiplex": { "enabled": true }
   }],
-  "outbounds": [{"type": "direct"}]
+  "outbounds": [
+    {"type": "direct", "tag": "direct"}
+  ]
 }
 CFGEOF
 
@@ -138,15 +166,15 @@ CFGEOF
 #include <netdb.h>
 #include <sys/timerfd.h>
 
-#define WS_PORT      80
-#define VL_HOST      "127.0.0.1"
+#define WS_PORT        80
+#define VL_HOST        "127.0.0.1"
 #define VL_PORT_NONE   8443
 #define VL_PORT_NORMAL 8444
 #define VL_PORT_FAMILY 8445
-#define BUF          65536
-#define MAXEV        4096
-#define IDLE_SEC     300
-#define MAXCONNS     8192
+#define BUF            65536
+#define MAXEV          4096
+#define IDLE_SEC       300
+#define MAXCONNS       8192
 
 static char g_central[256] = "central.brawlpass.com.ar";
 static int  g_central_port = 80;
@@ -264,7 +292,6 @@ static void cn_close(cn_t *c){
     if(c->cfd>=0){ epoll_ctl(c->ep,EPOLL_CTL_DEL,c->cfd,NULL); close(c->cfd); c->cfd=-1; }
     free(c);
 }
-
 static int verify_central(const char *hw, char *out, int outsz){
     out[0]=0;
     struct addrinfo hints={0},*res=NULL;
@@ -312,14 +339,11 @@ static int verify_central(const char *hw, char *out, int outsz){
         name,expire,days,premium,created);
     return 1;
 }
-
-/* dns_mode: "none"=8443  "normal"=8444  "family"=8445  default=8444 */
 static int dns_port(const char *mode){
     if(!strcasecmp(mode,"none"))   return VL_PORT_NONE;
     if(!strcasecmp(mode,"family")) return VL_PORT_FAMILY;
     return VL_PORT_NORMAL;
 }
-
 static void do_tunnel(cn_t *c, int ep, const char *hw,
                       const char *extra, int is_fast, int vl_port){
     cn_t *old=slot_replace(hw,c,is_fast);
@@ -350,7 +374,6 @@ static void do_tunnel(cn_t *c, int ep, const char *hw,
     struct epoll_event ce={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=c};
     epoll_ctl(ep,EPOLL_CTL_MOD,c->cfd,&ce);
 }
-
 int main(void){
     signal(SIGPIPE,SIG_IGN);
     FILE *cf=fopen("/var/lib/vproxy/config","r");
@@ -454,7 +477,7 @@ int main(void){
                 if(r<=0){ cn_close(c); goto nxt; }
                 c->hl+=r; c->hdr[c->hl]=0;
                 if(!strstr(c->hdr,"\r\n\r\n")&&!strstr(c->hdr,"\n\n")) goto nxt;
-                char action[32]={0}, hw[128]={0}, dns_mode[16]={0};
+                char action[32]={0},hw[128]={0},dns_mode[16]={0};
                 hget(c->hdr,"Action:",   action,   sizeof(action));
                 hget(c->hdr,"Auth:",     hw,        sizeof(hw));
                 hget(c->hdr,"Dns-Mode:", dns_mode,  sizeof(dns_mode));
@@ -505,7 +528,6 @@ CENTRAL=${CENTRAL_HOST}
 CENTRAL_PORT=${CENTRAL_PORT}
 EOF
 
-  # servicios sing-box (tres instancias)
   for mode in none normal family; do
     cat > /etc/systemd/system/sing-box-${mode}.service << EOF
 [Unit]
@@ -574,9 +596,9 @@ EOF
   echo "      IP      : $IP:80"
   echo "      UUID    : ${VLESS_UUID}"
   echo "      Central : ${CENTRAL_HOST}:${CENTRAL_PORT}"
-  echo "      DNS none   → :8443 (sin filtros)"
-  echo "      DNS normal → :8444 (AdGuard default)"
-  echo "      DNS family → :8445 (AdGuard family)"
+  echo "      DNS none   → sin filtros"
+  echo "      DNS normal → AdGuard (ads/tracking)"
+  echo "      DNS family → AdGuard Family"
   echo "  ════════════════════════════════════"
 }
 
