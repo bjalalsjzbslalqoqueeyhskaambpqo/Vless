@@ -29,8 +29,9 @@ do_install() {
   echo ""
   echo "[*] Dependencias..."
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y -q
-  apt-get install -y -q -o Dpkg::Options::="--force-confold" gcc curl ca-certificates
+  apt-get update -y -q 2>/dev/null || true
+  apt-get install -y -q -o Dpkg::Options::="--force-confold" gcc curl ca-certificates 2>/dev/null || \
+  apt-get install -y gcc curl ca-certificates
 
   echo "[*] Red BBR..."
   cat > /etc/sysctl.d/99-bt.conf << 'EOF'
@@ -64,13 +65,52 @@ EOF
 
   mkdir -p /etc/sing-box /opt/vproxy/bin /var/lib/vproxy
 
-  cat > /etc/sing-box/config.json << CFGEOF
+  # ── tres instancias sing-box: none(8443) normal(8444) family(8445) ──
+
+  cat > /etc/sing-box/config-none.json << CFGEOF
 {
   "log": { "level": "warn" },
+  "dns": {
+    "servers": [{"address": "94.140.14.140"}]
+  },
   "inbounds": [{
     "type": "vless",
     "listen": "127.0.0.1",
     "listen_port": 8443,
+    "users": [{"uuid": "${VLESS_UUID}"}],
+    "multiplex": { "enabled": true }
+  }],
+  "outbounds": [{"type": "direct"}]
+}
+CFGEOF
+
+  cat > /etc/sing-box/config-normal.json << CFGEOF
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [{"address": "94.140.14.14"}]
+  },
+  "inbounds": [{
+    "type": "vless",
+    "listen": "127.0.0.1",
+    "listen_port": 8444,
+    "users": [{"uuid": "${VLESS_UUID}"}],
+    "multiplex": { "enabled": true }
+  }],
+  "outbounds": [{"type": "direct"}]
+}
+CFGEOF
+
+  cat > /etc/sing-box/config-family.json << CFGEOF
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [{"address": "94.140.14.15"}]
+  },
+  "inbounds": [{
+    "type": "vless",
+    "listen": "127.0.0.1",
+    "listen_port": 8445,
     "users": [{"uuid": "${VLESS_UUID}"}],
     "multiplex": { "enabled": true }
   }],
@@ -98,13 +138,15 @@ CFGEOF
 #include <netdb.h>
 #include <sys/timerfd.h>
 
-#define WS_PORT   80
-#define VL_HOST   "127.0.0.1"
-#define VL_PORT   8443
-#define BUF       65536
-#define MAXEV     4096
-#define IDLE_SEC  300
-#define MAXCONNS  8192
+#define WS_PORT      80
+#define VL_HOST      "127.0.0.1"
+#define VL_PORT_NONE   8443
+#define VL_PORT_NORMAL 8444
+#define VL_PORT_FAMILY 8445
+#define BUF          65536
+#define MAXEV        4096
+#define IDLE_SEC     300
+#define MAXCONNS     8192
 
 static char g_central[256] = "central.brawlpass.com.ar";
 static int  g_central_port = 80;
@@ -153,11 +195,10 @@ static slot_t *slot_find(const char *hw){
     for(int i=0;i<nslots;i++) if(!strcmp(slots[i].hw,hw)) return &slots[i];
     return NULL;
 }
-
 static cn_t *slot_replace(const char *hw, cn_t *c, int is_fast){
     pthread_mutex_lock(&slotlock);
     slot_t *s=slot_find(hw);
-    if(!s && nslots<4096){
+    if(!s&&nslots<4096){
         s=&slots[nslots++];
         memset(s,0,sizeof(*s));
         strncpy(s->hw,hw,127);
@@ -170,7 +211,6 @@ static cn_t *slot_replace(const char *hw, cn_t *c, int is_fast){
     pthread_mutex_unlock(&slotlock);
     return old;
 }
-
 static void slot_remove(const char *hw, cn_t *c){
     if(!hw||!hw[0]) return;
     pthread_mutex_lock(&slotlock);
@@ -189,7 +229,6 @@ static void fd_nodelay(int fd){
     setsockopt(fd,SOL_SOCKET,SO_SNDBUF,&buf,sizeof(buf));
     setsockopt(fd,SOL_SOCKET,SO_RCVBUF,&buf,sizeof(buf));
 }
-
 static void hget(const char *h, const char *k, char *out, int sz){
     out[0]=0;
     const char *p=strcasestr(h,k); if(!p) return;
@@ -197,7 +236,6 @@ static void hget(const char *h, const char *k, char *out, int sz){
     int i=0; while(*p&&*p!='\r'&&*p!='\n'&&i<sz-1) out[i++]=*p++;
     out[i]=0;
 }
-
 static void send101(int fd, const char *extra){
     char buf[2048];
     snprintf(buf,sizeof(buf),
@@ -206,7 +244,6 @@ static void send101(int fd, const char *extra){
         "%s\r\n", extra?extra:"");
     send(fd,buf,strlen(buf),MSG_NOSIGNAL);
 }
-
 static void arm_timerfd(cn_t *c){
     if(c->tfd>=0) return;
     int tfd=timerfd_create(CLOCK_MONOTONIC,TFD_NONBLOCK|TFD_CLOEXEC);
@@ -217,7 +254,6 @@ static void arm_timerfd(cn_t *c){
     epoll_ctl(c->ep,EPOLL_CTL_ADD,tfd,&te);
     c->tfd=tfd;
 }
-
 static void cn_close(cn_t *c){
     if(!c) return;
     if(c->hw[0]) slot_remove(c->hw,c);
@@ -265,11 +301,11 @@ static int verify_central(const char *hw, char *out, int outsz){
     hget(buf,"X-Status:",status,sizeof(status));
     if(strcasecmp(status,"OK")!=0) return 0;
     char name[64]={0},expire[32]={0},days[16]={0},premium[4]={0},created[32]={0};
-    hget(buf,"X-Name:",    name,    sizeof(name));
-    hget(buf,"X-Expire:",  expire,  sizeof(expire));
-    hget(buf,"X-Days-Left:",days,   sizeof(days));
-    hget(buf,"X-Premium:", premium, sizeof(premium));
-    hget(buf,"X-Created:", created, sizeof(created));
+    hget(buf,"X-Name:",     name,    sizeof(name));
+    hget(buf,"X-Expire:",   expire,  sizeof(expire));
+    hget(buf,"X-Days-Left:",days,    sizeof(days));
+    hget(buf,"X-Premium:",  premium, sizeof(premium));
+    hget(buf,"X-Created:",  created, sizeof(created));
     snprintf(out,outsz,
         "X-Status: OK\r\nX-Name: %s\r\nX-Expire: %s\r\n"
         "X-Days-Left: %s\r\nX-Premium: %s\r\nX-Created: %s\r\n",
@@ -277,13 +313,21 @@ static int verify_central(const char *hw, char *out, int outsz){
     return 1;
 }
 
-static void do_tunnel(cn_t *c, int ep, const char *hw, const char *extra, int is_fast){
+/* dns_mode: "none"=8443  "normal"=8444  "family"=8445  default=8444 */
+static int dns_port(const char *mode){
+    if(!strcasecmp(mode,"none"))   return VL_PORT_NONE;
+    if(!strcasecmp(mode,"family")) return VL_PORT_FAMILY;
+    return VL_PORT_NORMAL;
+}
+
+static void do_tunnel(cn_t *c, int ep, const char *hw,
+                      const char *extra, int is_fast, int vl_port){
     cn_t *old=slot_replace(hw,c,is_fast);
     if(old&&old!=c){ active_dec(); cn_close(old); }
     strncpy(c->hw,hw,127);
     int vfd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
     fd_nodelay(vfd);
-    struct sockaddr_in vsa={.sin_family=AF_INET,.sin_port=htons(VL_PORT),
+    struct sockaddr_in vsa={.sin_family=AF_INET,.sin_port=htons(vl_port),
                              .sin_addr.s_addr=inet_addr(VL_HOST)};
     if(connect(vfd,(struct sockaddr*)&vsa,sizeof(vsa))<0&&errno!=EINPROGRESS){
         close(vfd); slot_remove(hw,c); c->hw[0]=0;
@@ -410,9 +454,11 @@ int main(void){
                 if(r<=0){ cn_close(c); goto nxt; }
                 c->hl+=r; c->hdr[c->hl]=0;
                 if(!strstr(c->hdr,"\r\n\r\n")&&!strstr(c->hdr,"\n\n")) goto nxt;
-                char action[32]={0},hw[128]={0};
-                hget(c->hdr,"Action:",action,sizeof(action));
-                hget(c->hdr,"Auth:",  hw,    sizeof(hw));
+                char action[32]={0}, hw[128]={0}, dns_mode[16]={0};
+                hget(c->hdr,"Action:",   action,   sizeof(action));
+                hget(c->hdr,"Auth:",     hw,        sizeof(hw));
+                hget(c->hdr,"Dns-Mode:", dns_mode,  sizeof(dns_mode));
+                if(!dns_mode[0]) snprintf(dns_mode,sizeof(dns_mode),"normal");
                 if(!hw[0]||!action[0]){ cn_close(c); goto nxt; }
                 for(char *p=hw;*p;p++) if(*p=='/'||*p=='.'||*p==' '){ cn_close(c); goto nxt; }
                 if(!strcasecmp(action,"auth")){
@@ -429,7 +475,7 @@ int main(void){
                         send101(c->cfd,"X-Status: INVALID\r\n");
                         cn_close(c); goto nxt;
                     }
-                    do_tunnel(c,ep,hw,extra,0);
+                    do_tunnel(c,ep,hw,extra,0,dns_port(dns_mode));
                     goto nxt;
                 }
                 if(!strcasecmp(action,"tunnel-fast")){
@@ -438,7 +484,7 @@ int main(void){
                         send101(c->cfd,"X-Status: INVALID\r\n");
                         cn_close(c); goto nxt;
                     }
-                    do_tunnel(c,ep,hw,extra,1);
+                    do_tunnel(c,ep,hw,extra,1,dns_port(dns_mode));
                     goto nxt;
                 }
                 cn_close(c);
@@ -459,10 +505,26 @@ CENTRAL=${CENTRAL_HOST}
 CENTRAL_PORT=${CENTRAL_PORT}
 EOF
 
+  # servicios sing-box (tres instancias)
+  for mode in none normal family; do
+    cat > /etc/systemd/system/sing-box-${mode}.service << EOF
+[Unit]
+Description=sing-box ${mode}
+After=network.target
+[Service]
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config-${mode}.json
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+  done
+
   cat > /etc/systemd/system/vproxy.service << EOF
 [Unit]
 Description=BlackTunnel vproxy
-After=network.target sing-box.service
+After=network.target sing-box-normal.service
 [Service]
 ExecStart=${VPROXY_BIN}
 Restart=always
@@ -471,21 +533,6 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
-
-  if [ ! -f /etc/systemd/system/sing-box.service ]; then
-    cat > /etc/systemd/system/sing-box.service << 'EOF'
-[Unit]
-Description=sing-box
-After=network.target
-[Service]
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-[Install]
-WantedBy=multi-user.target
-EOF
-  fi
 
   cat > /etc/systemd/system/bt-watchdog.service << 'EOF'
 [Unit]
@@ -507,15 +554,15 @@ EOF
 
   cat > /opt/vproxy/watchdog.sh << 'EOF'
 #!/bin/bash
-for svc in sing-box vproxy; do
+for svc in sing-box-none sing-box-normal sing-box-family vproxy; do
   systemctl is-active --quiet "$svc" || systemctl restart "$svc"
 done
 EOF
   chmod +x /opt/vproxy/watchdog.sh
 
   systemctl daemon-reload
-  systemctl enable sing-box vproxy bt-watchdog.timer
-  systemctl restart sing-box
+  systemctl enable sing-box-none sing-box-normal sing-box-family vproxy bt-watchdog.timer
+  systemctl restart sing-box-none sing-box-normal sing-box-family
   sleep 2
   systemctl restart vproxy
   systemctl restart bt-watchdog.timer
@@ -527,12 +574,15 @@ EOF
   echo "      IP      : $IP:80"
   echo "      UUID    : ${VLESS_UUID}"
   echo "      Central : ${CENTRAL_HOST}:${CENTRAL_PORT}"
-  echo "      idle    : ${IDLE_SEC}s"
+  echo "      DNS none   → :8443 (sin filtros)"
+  echo "      DNS normal → :8444 (AdGuard default)"
+  echo "      DNS family → :8445 (AdGuard family)"
   echo "  ════════════════════════════════════"
 }
 
 do_restart() {
-  systemctl restart sing-box vproxy 2>/dev/null && echo "  [✓] Reiniciados" || echo "  [!] Error"
+  systemctl restart sing-box-none sing-box-normal sing-box-family vproxy 2>/dev/null \
+    && echo "  [✓] Reiniciados" || echo "  [!] Error"
 }
 
 case "${1:-}" in
