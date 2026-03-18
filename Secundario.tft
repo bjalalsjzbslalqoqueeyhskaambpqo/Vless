@@ -481,7 +481,7 @@ int main(void){
                 hget(c->hdr,"Action:",   action,   sizeof(action));
                 hget(c->hdr,"Auth:",     hw,        sizeof(hw));
                 hget(c->hdr,"Dns-Mode:", dns_mode,  sizeof(dns_mode));
-                if(!dns_mode[0]) snprintf(dns_mode,sizeof(dns_mode),"normal");
+                if(!dns_mode[0]) snprintf(dns_mode,sizeof(dns_mode),"none");
                 if(!hw[0]||!action[0]){ cn_close(c); goto nxt; }
                 for(char *p=hw;*p;p++) if(*p=='/'||*p=='.'||*p==' '){ cn_close(c); goto nxt; }
                 if(!strcasecmp(action,"auth")){
