@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recargas</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #111118;
+    --surface2: #1a1a24;
+    --border: #2a2a38;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --accent-glow: rgba(59,130,246,0.18);
+    --text: #e8e8f0;
+    --text-muted: #6b7280;
+    --text-dim: #9ca3af;
+    --green: #10b981;
+    --green-bg: rgba(16,185,129,0.12);
+    --red: #ef4444;
+    --red-bg: rgba(239,68,68,0.12);
+    --yellow: #f59e0b;
+    --yellow-bg: rgba(245,158,11,0.12);
+    --radius: 10px;
+    --shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; min-height: 100vh; }
+  input, select, button { font-family: inherit; font-size: 14px; }
+
+  /* ── ANIMATIONS ── */
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes shimmer { 0% { background-position: -600px 0; } 100% { background-position: 600px 0; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes scaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+  @keyframes progress { from { width: 0%; } to { width: 100%; } }
+  @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+
+  /* ── SKELETON ── */
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface2) 25%, var(--border) 50%, var(--surface2) 75%);
+    background-size: 1200px 100%;
+    animation: shimmer 1.6s infinite linear;
+    border-radius: 6px;
+  }
+  .skel-row { height: 44px; margin-bottom: 8px; }
+  .skel-sm { height: 18px; width: 50%; margin-bottom: 8px; }
+
+  /* ── SPINNER ── */
+  .spinner {
+    display: inline-block; width: 18px; height: 18px;
+    border: 2px solid rgba(255,255,255,0.2);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+    vertical-align: middle; margin-right: 8px; flex-shrink: 0;
+  }
+
+  /* ── LOGIN ── */
+  .login-wrap {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 20px;
+    background:
+      radial-gradient(ellipse at 20% 20%, rgba(59,130,246,0.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 80%, rgba(16,185,129,0.06) 0%, transparent 50%);
+  }
+  .login-box {
+    background: var(--surface); padding: 44px 36px 36px;
+    border-radius: 20px; width: 100%; max-width: 380px;
+    border: 1px solid var(--border); box-shadow: var(--shadow);
+    animation: scaleIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+  .login-icon-wrap {
+    text-align: center; margin-bottom: 24px;
+  }
+  .login-icon {
+    width: 64px; height: 64px; background: linear-gradient(135deg, var(--accent), #06b6d4);
+    border-radius: 18px; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 28px; color: white;
+    box-shadow: 0 8px 32px rgba(59,130,246,0.35);
+    animation: float 3s ease-in-out infinite;
+  }
+  .login-box h2 { text-align: center; font-size: 24px; font-weight: 800; margin-bottom: 4px; }
+  .login-box .sub { text-align: center; color: var(--text-muted); font-size: 13px; margin-bottom: 28px; }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 11px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .field input { width: 100%; padding: 12px 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
+  .field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); background: var(--surface); }
+  .field input::placeholder { color: var(--text-muted); }
+
+  /* ── BTN ── */
+  .btn { padding: 12px 20px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 700; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+  .btn-primary { background: var(--accent); color: white; width: 100%; margin-top: 6px; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(59,130,246,0.4); }
+  .btn-primary:active { transform: translateY(0); }
+  .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn-sm { width: auto; padding: 7px 14px; font-size: 12px; border-radius: 8px; }
+  .btn-ghost { background: rgba(255,255,255,0.07); color: var(--text-dim); border: 1px solid var(--border); }
+  .btn-ghost:hover { background: var(--border); color: var(--text); }
+  .btn-outline { background: transparent; color: var(--accent); border: 1px solid rgba(59,130,246,0.35); }
+  .btn-outline:hover { background: var(--accent-glow); }
+
+  /* ── PANEL ── */
+  .panel { display: none; min-height: 100vh; }
+  .panel.activo { display: flex; flex-direction: column; animation: fadeIn 0.3s ease both; }
+
+  /* ── NAVBAR ── */
+  .navbar {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 0 20px; display: flex; justify-content: space-between; align-items: center;
+    position: sticky; top: 0; z-index: 100; height: 64px;
+    backdrop-filter: blur(16px);
+  }
+  .navbar-left { display: flex; flex-direction: column; gap: 1px; }
+  .navbar-greeting { font-size: 11px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; }
+  .navbar-user { font-size: 15px; font-weight: 700; }
+  .saldo-wrap {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 8px 16px; text-align: center; min-width: 130px;
+  }
+  .saldo-label { font-size: 10px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
+  .saldo-value { font-size: 20px; font-weight: 800; color: var(--accent); font-family: monospace; }
+  .navbar-right { display: flex; align-items: center; gap: 10px; }
+
+  /* ── TABS ── */
+  .tabs { background: var(--surface); border-bottom: 1px solid var(--border); display: flex; }
+  .tab { flex: 1; padding: 15px 10px; cursor: pointer; text-align: center; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--text-muted); font-size: 13px; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 7px; }
+  .tab:hover { color: var(--text); background: rgba(255,255,255,0.02); }
+  .tab.activo { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .tab-icon { font-size: 16px; }
+
+  /* ── CONTENIDO ── */
+  .contenido { padding: 24px 20px; max-width: 560px; margin: 0 auto; width: 100%; flex: 1; }
+  .seccion { display: none; }
+  .seccion.activa { display: block; animation: fadeIn 0.25s ease both; }
+
+  /* ── CARD ── */
+  .card { background: var(--surface); border-radius: 14px; padding: 22px; margin-bottom: 14px; border: 1px solid var(--border); box-shadow: 0 2px 12px rgba(0,0,0,0.2); }
+  .card-header { margin-bottom: 20px; }
+  .card-title { font-size: 16px; font-weight: 700; color: var(--text); }
+  .card-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  /* ── FORM ── */
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 11px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .form-control { width: 100%; padding: 12px 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; appearance: none; -webkit-appearance: none; }
+  .form-control:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); background: var(--surface); }
+  .form-control::placeholder { color: var(--text-muted); }
+  select.form-control { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; padding-right: 36px; cursor: pointer; }
+  select.form-control option { background: var(--surface); color: var(--text); }
+
+  /* ── SERVICIO CHIPS ── */
+  .servicio-chips { display: flex; gap: 8px; margin-bottom: 14px; }
+  .chip {
+    flex: 1; padding: 10px 8px; border-radius: 10px; text-align: center;
+    border: 1.5px solid var(--border); background: var(--surface2);
+    cursor: pointer; transition: all 0.2s; font-size: 13px; font-weight: 600; color: var(--text-muted);
+  }
+  .chip:hover { border-color: var(--accent); color: var(--text); }
+  .chip.selected { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
+  .chip-logo { font-size: 20px; display: block; margin-bottom: 4px; }
+
+  /* ── RESULTADO ── */
+  .resultado {
+    border-radius: 12px; padding: 18px 16px; margin-top: 14px;
+    display: none; text-align: center; font-size: 14px; font-weight: 500;
+    line-height: 1.6; animation: slideUp 0.3s ease both;
+  }
+  .resultado.show { display: block; }
+  .res-ok { background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.25); }
+  .res-err { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
+  .res-cargando { background: var(--yellow-bg); color: var(--yellow); border: 1px solid rgba(245,158,11,0.25); }
+  .resultado-icon { font-size: 28px; margin-bottom: 10px; display: block; }
+
+  /* ── PROGRESS BAR ── */
+  .progress-wrap { height: 3px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 12px; display: none; }
+  .progress-wrap.show { display: block; }
+  .progress-bar { height: 100%; background: var(--accent); border-radius: 3px; animation: progress 20s linear forwards; }
+
+  /* ── TABLE ── */
+  .tabla-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 380px; }
+  th { padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+  td { padding: 14px 12px; border-bottom: 1px solid rgba(42,42,56,0.5); vertical-align: middle; color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* ── BADGE ── */
+  .badge { padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
+  .badge-verde { background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.2); }
+  .badge-rojo { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
+
+  /* ── EMPTY ── */
+  .vacio { text-align: center; color: var(--text-muted); padding: 48px 20px; }
+  .vacio-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.35; }
+  .vacio-text { font-size: 13px; }
+
+  /* ── MSG ── */
+  .msg-err { color: var(--red); font-size: 13px; margin-top: 10px; text-align: center; padding: 8px; background: var(--red-bg); border-radius: 8px; display: none; animation: slideUp 0.2s ease both; }
+  .msg-err.show { display: block; }
+
+  @media (max-width: 480px) {
+    .contenido { padding: 16px 14px; }
+    .card { padding: 18px 16px; }
+    .login-box { padding: 36px 24px 28px; }
+    .navbar { padding: 0 14px; }
+    .saldo-wrap { min-width: 110px; padding: 6px 12px; }
+    .saldo-value { font-size: 17px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginWrap" class="login-wrap">
+  <div class="login-box">
+    <div class="login-icon-wrap">
+      <div class="login-icon">📱</div>
+    </div>
+    <h2>Recargas</h2>
+    <p class="sub">Ingresá con tu cuenta para continuar</p>
+    <div class="field">
+      <label>Usuario</label>
+      <input type="text" id="loginUser" placeholder="Tu usuario" autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Contraseña</label>
+      <input type="password" id="loginPass" placeholder="••••••••" autocomplete="current-password">
+    </div>
+    <button class="btn btn-primary" id="btnLogin" onclick="login()">
+      Ingresar
+    </button>
+    <p id="loginErr" class="msg-err"></p>
+  </div>
+</div>
+
+<!-- PANEL -->
+<div id="panel" class="panel">
+  <nav class="navbar">
+    <div class="navbar-left">
+      <span class="navbar-greeting">Bienvenido</span>
+      <span class="navbar-user" id="navUser">—</span>
+    </div>
+    <div class="saldo-wrap">
+      <div class="saldo-label">Saldo disponible</div>
+      <div class="saldo-value">$<span id="navSaldo">0</span></div>
+    </div>
+    <div class="navbar-right">
+      <button class="btn btn-sm btn-ghost" onclick="cerrarSesion()">Salir</button>
+    </div>
+  </nav>
+
+  <div class="tabs">
+    <div class="tab activo" onclick="cambiarTab('recargar')" id="tab-recargar">
+      <span class="tab-icon">⚡</span> Recargar
+    </div>
+    <div class="tab" onclick="cambiarTab('historial')" id="tab-historial">
+      <span class="tab-icon">📋</span> Historial
+    </div>
+  </div>
+
+  <div class="contenido">
+
+    <!-- RECARGAR -->
+    <div id="sec-recargar" class="seccion activa">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Nueva recarga</div>
+          <div class="card-sub">Seleccioná el servicio, número y monto</div>
+        </div>
+
+        <div class="form-group">
+          <label>Servicio</label>
+          <div class="servicio-chips" id="servicioChips">
+            <div class="chip selected" onclick="seleccionarServicio('movistar', this)">
+              <span class="chip-logo">📶</span>
+              Movistar
+            </div>
+            <div class="chip" onclick="seleccionarServicio('personal', this)">
+              <span class="chip-logo">📡</span>
+              Personal
+            </div>
+          </div>
+          <input type="hidden" id="servicio" value="movistar">
+        </div>
+
+        <div class="form-group">
+          <label>Número de teléfono</label>
+          <input type="tel" id="numeroDestino" class="form-control" placeholder="Ej: 1123456789" maxlength="10">
+        </div>
+
+        <div class="form-group">
+          <label>Monto a recargar</label>
+          <select id="monto" class="form-control">
+            <option value="">Seleccionar monto</option>
+          </select>
+        </div>
+
+        <button class="btn btn-primary" id="btnRecargar" onclick="recargar()">
+          ⚡ Recargar ahora
+        </button>
+
+        <div class="progress-wrap" id="progressWrap">
+          <div class="progress-bar" id="progressBar"></div>
+        </div>
+
+        <div id="resultado" class="resultado"></div>
+      </div>
+    </div>
+
+    <!-- HISTORIAL -->
+    <div id="sec-historial" class="seccion">
+      <div class="card">
+        <div class="card-header" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+          <div>
+            <div class="card-title">Mis recargas</div>
+            <div class="card-sub">Últimas operaciones realizadas</div>
+          </div>
+          <button class="btn btn-sm btn-outline" onclick="cargarHistorial()">↻ Actualizar</button>
+        </div>
+        <div class="tabla-wrap">
+          <table>
+            <thead>
+              <tr><th>Fecha</th><th>Servicio</th><th>Número</th><th>Monto</th><th>Estado</th></tr>
+            </thead>
+            <tbody id="tablaHistorial">
+              <tr><td colspan="5"><div class="skeleton skel-row"></div><div class="skeleton skel-row"></div><div class="skeleton skel-sm"></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+let TOKEN = localStorage.getItem('userToken')
+let USUARIO = localStorage.getItem('userName')
+let SERVICIOS = {}
+
+// ── HELPERS ──
+function setLoadingBtn(btnId, loading, text) {
+  const btn = document.getElementById(btnId)
+  if (loading) {
+    btn.disabled = true
+    btn.innerHTML = '<span class="spinner"></span>' + (text || 'Cargando...')
+  } else {
+    btn.disabled = false
+    btn.innerHTML = text || 'Continuar'
+  }
+}
+
+// ── API ──
+async function api(url, method, body) {
+  method = method || 'GET'
+  const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN } }
+  if (body) opts.body = JSON.stringify(body)
+  const r = await fetch(url, opts)
+  return r.json()
+}
+
+// ── AUTH ──
+async function login() {
+  const usuario = document.getElementById('loginUser').value.trim()
+  const password = document.getElementById('loginPass').value
+  if (!usuario || !password) return
+  setLoadingBtn('btnLogin', true, 'Ingresando...')
+  const errEl = document.getElementById('loginErr')
+  errEl.classList.remove('show')
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usuario, password })
+    }).then(r => r.json())
+    if (r.token) {
+      TOKEN = r.token
+      USUARIO = usuario
+      localStorage.setItem('userToken', TOKEN)
+      localStorage.setItem('userName', usuario)
+      mostrarPanel(r.saldo)
+    } else {
+      errEl.textContent = r.error || 'Usuario o contraseña incorrectos'
+      errEl.classList.add('show')
+    }
+  } catch(e) {
+    errEl.textContent = 'Error de conexión. Intentá de nuevo.'
+    errEl.classList.add('show')
+  }
+  setLoadingBtn('btnLogin', false, 'Ingresar')
+}
+
+function cerrarSesion() {
+  localStorage.removeItem('userToken')
+  localStorage.removeItem('userName')
+  location.reload()
+}
+
+function mostrarPanel(saldo) {
+  document.getElementById('loginWrap').style.display = 'none'
+  document.getElementById('panel').classList.add('activo')
+  document.getElementById('navUser').textContent = USUARIO || '—'
+  if (saldo !== undefined) setSaldo(saldo)
+  else cargarSaldo()
+  cargarServicios()
+}
+
+async function cargarSaldo() {
+  const r = await api('/api/saldo')
+  setSaldo(r.saldo)
+}
+
+function setSaldo(saldo) {
+  const el = document.getElementById('navSaldo')
+  el.textContent = Number(saldo).toLocaleString('es-AR')
+}
+
+// ── SERVICIOS ──
+async function cargarServicios() {
+  try {
+    SERVICIOS = await fetch('/api/servicios').then(r => r.json())
+    actualizarMontos()
+  } catch(e) {}
+}
+
+function seleccionarServicio(servicio, chipEl) {
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('selected'))
+  chipEl.classList.add('selected')
+  document.getElementById('servicio').value = servicio
+  actualizarMontos()
+}
+
+function actualizarMontos() {
+  const servicio = document.getElementById('servicio').value
+  const montos = SERVICIOS[servicio] ? SERVICIOS[servicio].montos : []
+  const select = document.getElementById('monto')
+  select.innerHTML = '<option value="">— Seleccioná un monto —</option>' +
+    montos.map(m => `<option value="${m}">$${m.toLocaleString('es-AR')}</option>`).join('')
+}
+
+// ── TABS ──
+function cambiarTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('activo'))
+  document.getElementById('tab-' + tab).classList.add('activo')
+  document.querySelectorAll('.seccion').forEach(s => s.classList.remove('activa'))
+  document.getElementById('sec-' + tab).classList.add('activa')
+  if (tab === 'historial') cargarHistorial()
+}
+
+// ── RECARGAR ──
+async function recargar() {
+  const servicio = document.getElementById('servicio').value
+  const numero = document.getElementById('numeroDestino').value.trim()
+  const monto = document.getElementById('monto').value
+
+  if (!numero || numero.length < 10) return mostrarResultado('Ingresá un número válido de 10 dígitos', null, false)
+  if (!monto) return mostrarResultado('Seleccioná un monto', null, false)
+
+  setLoadingBtn('btnRecargar', true, 'Procesando recarga...')
+  mostrarResultado('Procesando recarga, aguardá un momento...', '⏳', null)
+
+  // mostrar barra de progreso
+  const pw = document.getElementById('progressWrap')
+  const pb = document.getElementById('progressBar')
+  pw.classList.add('show')
+  pb.style.animation = 'none'
+  pb.offsetHeight // reflow
+  pb.style.animation = 'progress 20s linear forwards'
+
+  try {
+    const r = await api('/api/recargar', 'POST', { servicio, numero, monto: parseFloat(monto) })
+    pw.classList.remove('show')
+    setLoadingBtn('btnRecargar', false, '⚡ Recargar ahora')
+    if (r.ok) {
+      mostrarResultado('¡Recarga realizada con éxito!', '✅', true)
+      cargarSaldo()
+    } else {
+      if (r.error === 'Saldo insuficiente') {
+        mostrarResultado('Saldo insuficiente. Contactá al administrador.', '⚠️', false)
+      } else {
+        mostrarResultado('El servicio no está disponible en este momento. Intentá más tarde o contactá al administrador.', '❌', false)
+        cargarSaldo()
+      }
+    }
+  } catch(e) {
+    pw.classList.remove('show')
+    setLoadingBtn('btnRecargar', false, '⚡ Recargar ahora')
+    mostrarResultado('Error de conexión. Verificá tu internet.', '❌', false)
+  }
+}
+
+function mostrarResultado(msg, icon, ok) {
+  const el = document.getElementById('resultado')
+  el.innerHTML = (icon ? `<span class="resultado-icon">${icon}</span>` : '') + msg
+  el.className = 'resultado show ' + (ok === true ? 'res-ok' : ok === false ? 'res-err' : 'res-cargando')
+}
+
+// ── HISTORIAL ──
+async function cargarHistorial() {
+  const tbody = document.getElementById('tablaHistorial')
+  tbody.innerHTML = `<tr><td colspan="5"><div class="skeleton skel-row"></div><div class="skeleton skel-row"></div><div class="skeleton skel-sm"></div></td></tr>`
+  try {
+    const rows = await api('/api/historial')
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="5"><div class="vacio"><div class="vacio-icon">📭</div><div class="vacio-text">Todavía no realizaste recargas</div></div></td></tr>`
+      return
+    }
+    tbody.innerHTML = rows.map(h => {
+      const fecha = new Date(h.fecha).toLocaleString('es-AR', {
+        timeZone: 'America/Argentina/Buenos_Aires',
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+      })
+      const ok = h.estado === 'exitoso'
+      return `<tr>
+        <td style="color:var(--text-muted); font-size:12px; white-space:nowrap">${fecha}</td>
+        <td style="text-transform:capitalize; font-weight:600">${h.servicio}</td>
+        <td style="font-family:monospace; color:var(--text-dim)">${h.numero_destino}</td>
+        <td style="font-family:monospace; font-weight:700; color:var(--accent)">$${Number(h.monto).toLocaleString('es-AR')}</td>
+        <td><span class="badge ${ok ? 'badge-verde' : 'badge-rojo'}">${ok ? '✓ Exitosa' : '✗ Fallida'}</span></td>
+      </tr>`
+    }).join('')
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="vacio"><div class="vacio-text">Error al cargar historial</div></div></td></tr>`
+  }
+}
+
+// ── INIT ──
+if (TOKEN) mostrarPanel()
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.getElementById('loginWrap').style.display !== 'none') login()
+})
+</script>
+</body>
+</html>
