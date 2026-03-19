@@ -65,16 +65,16 @@ EOF
 
   mkdir -p /etc/sing-box /opt/vproxy/bin /var/lib/vproxy
 
-  # ── sing-box none :8443 — sin filtros ──────────────────────────
+  # ── none :8443 — sin filtros (94.140.14.140) ───────────────────
   cat > /etc/sing-box/config-none.json << CFGEOF
 {
   "log": { "level": "warn" },
   "dns": {
     "servers": [
       {
+        "type": "udp",
         "tag": "dns-none",
-        "address": "https://unfiltered.adguard-dns.com/dns-query",
-        "detour": "direct"
+        "server": "94.140.14.140"
       }
     ],
     "final": "dns-none"
@@ -86,22 +86,20 @@ EOF
     "users": [{"uuid": "${VLESS_UUID}"}],
     "multiplex": { "enabled": true }
   }],
-  "outbounds": [
-    {"type": "direct", "tag": "direct"}
-  ]
+  "outbounds": [{"type": "direct", "tag": "direct"}]
 }
 CFGEOF
 
-  # ── sing-box normal :8444 — bloquea ads y tracking ─────────────
+  # ── normal :8444 — bloquea ads/tracking (94.140.14.14) ─────────
   cat > /etc/sing-box/config-normal.json << CFGEOF
 {
   "log": { "level": "warn" },
   "dns": {
     "servers": [
       {
+        "type": "udp",
         "tag": "dns-normal",
-        "address": "https://dns.adguard-dns.com/dns-query",
-        "detour": "direct"
+        "server": "94.140.14.14"
       }
     ],
     "final": "dns-normal"
@@ -113,22 +111,20 @@ CFGEOF
     "users": [{"uuid": "${VLESS_UUID}"}],
     "multiplex": { "enabled": true }
   }],
-  "outbounds": [
-    {"type": "direct", "tag": "direct"}
-  ]
+  "outbounds": [{"type": "direct", "tag": "direct"}]
 }
 CFGEOF
 
-  # ── sing-box family :8445 — bloquea ads + adulto ───────────────
+  # ── family :8445 — bloquea ads + adulto (94.140.14.15) ─────────
   cat > /etc/sing-box/config-family.json << CFGEOF
 {
   "log": { "level": "warn" },
   "dns": {
     "servers": [
       {
+        "type": "udp",
         "tag": "dns-family",
-        "address": "https://family.adguard-dns.com/dns-query",
-        "detour": "direct"
+        "server": "94.140.14.15"
       }
     ],
     "final": "dns-family"
@@ -140,9 +136,7 @@ CFGEOF
     "users": [{"uuid": "${VLESS_UUID}"}],
     "multiplex": { "enabled": true }
   }],
-  "outbounds": [
-    {"type": "direct", "tag": "direct"}
-  ]
+  "outbounds": [{"type": "direct", "tag": "direct"}]
 }
 CFGEOF
 
@@ -249,7 +243,6 @@ static void slot_remove(const char *hw, cn_t *c){
     }
     pthread_mutex_unlock(&slotlock);
 }
-
 static void fd_nodelay(int fd){
     int v=1, buf=131072;
     setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&v,sizeof(v));
@@ -340,9 +333,9 @@ static int verify_central(const char *hw, char *out, int outsz){
     return 1;
 }
 static int dns_port(const char *mode){
-    if(!strcasecmp(mode,"none"))   return VL_PORT_NONE;
+    if(!strcasecmp(mode,"normal")) return VL_PORT_NORMAL;
     if(!strcasecmp(mode,"family")) return VL_PORT_FAMILY;
-    return VL_PORT_NORMAL;
+    return VL_PORT_NONE;
 }
 static void do_tunnel(cn_t *c, int ep, const char *hw,
                       const char *extra, int is_fast, int vl_port){
@@ -546,7 +539,7 @@ EOF
   cat > /etc/systemd/system/vproxy.service << EOF
 [Unit]
 Description=BlackTunnel vproxy
-After=network.target sing-box-normal.service
+After=network.target sing-box-none.service
 [Service]
 ExecStart=${VPROXY_BIN}
 Restart=always
@@ -596,9 +589,9 @@ EOF
   echo "      IP      : $IP:80"
   echo "      UUID    : ${VLESS_UUID}"
   echo "      Central : ${CENTRAL_HOST}:${CENTRAL_PORT}"
-  echo "      DNS none   → sin filtros"
-  echo "      DNS normal → AdGuard (ads/tracking)"
-  echo "      DNS family → AdGuard Family"
+  echo "      none    → :8443  sin filtros"
+  echo "      normal  → :8444  AdGuard ads/tracking"
+  echo "      family  → :8445  AdGuard family"
   echo "  ════════════════════════════════════"
 }
 
