@@ -1,680 +1,607 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin - Recargas</title>
-<style>
-  :root {
-    --bg: #0a0a0f;
-    --surface: #111118;
-    --surface2: #1a1a24;
-    --border: #2a2a38;
-    --accent: #3b82f6;
-    --accent-hover: #2563eb;
-    --accent-glow: rgba(59,130,246,0.15);
-    --text: #e8e8f0;
-    --text-muted: #6b7280;
-    --text-dim: #9ca3af;
-    --green: #10b981;
-    --green-bg: rgba(16,185,129,0.12);
-    --red: #ef4444;
-    --red-bg: rgba(239,68,68,0.12);
-    --yellow: #f59e0b;
-    --radius: 10px;
-    --shadow: 0 4px 24px rgba(0,0,0,0.4);
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; min-height: 100vh; }
-  input, select, button, textarea { font-family: inherit; font-size: 14px; }
+#!/bin/bash
+set -e
 
-  /* ── ANIMATIONS ── */
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-  @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
-  @keyframes glow { 0%,100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); } 50% { box-shadow: 0 0 0 4px rgba(59,130,246,0.2); } }
+VLESS_UUID="11111111-1111-1111-1111-111111111111"
+CENTRAL_HOST="central.brawlpass.com.ar"
+CENTRAL_PORT=80
+VPROXY_BIN="/opt/vproxy/bin/vproxy"
 
-  .fade-in { animation: fadeIn 0.35s ease both; }
-
-  /* ── SKELETON ── */
-  .skeleton {
-    background: linear-gradient(90deg, var(--surface2) 25%, var(--border) 50%, var(--surface2) 75%);
-    background-size: 800px 100%;
-    animation: shimmer 1.6s infinite linear;
-    border-radius: 6px;
-  }
-  .skel-row { height: 44px; margin-bottom: 8px; }
-  .skel-sm { height: 20px; width: 60%; margin-bottom: 8px; }
-
-  /* ── SPINNER ── */
-  .spinner {
-    display: inline-block; width: 16px; height: 16px;
-    border: 2px solid rgba(255,255,255,0.2);
-    border-top-color: white;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle; margin-right: 6px;
-  }
-  .spinner-lg {
-    width: 32px; height: 32px; border-width: 3px;
-    border-color: var(--border); border-top-color: var(--accent);
-    margin: 0 auto; display: block;
-  }
-
-  /* ── LOGIN ── */
-  .login-wrap {
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh; padding: 20px;
-    background: radial-gradient(ellipse at 50% 0%, rgba(59,130,246,0.12) 0%, transparent 70%);
-  }
-  .login-box {
-    background: var(--surface); padding: 40px 36px;
-    border-radius: 16px; width: 100%; max-width: 360px;
-    border: 1px solid var(--border); box-shadow: var(--shadow);
-    animation: fadeIn 0.5s ease both;
-  }
-  .login-logo {
-    width: 48px; height: 48px; background: var(--accent);
-    border-radius: 12px; display: flex; align-items: center; justify-content: center;
-    margin: 0 auto 20px; font-size: 22px; color: white;
-    box-shadow: 0 0 24px rgba(59,130,246,0.4);
-  }
-  .login-box h2 { text-align: center; font-size: 22px; font-weight: 700; margin-bottom: 4px; }
-  .login-box .sub { text-align: center; color: var(--text-muted); font-size: 13px; margin-bottom: 28px; }
-  .field { margin-bottom: 16px; }
-  .field label { display: block; font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 6px; letter-spacing: 0.04em; text-transform: uppercase; }
-  .field input { width: 100%; padding: 11px 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); transition: border-color 0.2s, box-shadow 0.2s; }
-  .field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
-
-  /* ── BUTTONS ── */
-  .btn { padding: 10px 18px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
-  .btn-primary { background: var(--accent); color: white; width: 100%; justify-content: center; margin-top: 4px; }
-  .btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(59,130,246,0.35); }
-  .btn-primary:active { transform: translateY(0); }
-  .btn-sm { padding: 6px 12px; font-size: 12px; }
-  .btn-verde { background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.25); }
-  .btn-verde:hover { background: rgba(16,185,129,0.2); }
-  .btn-rojo { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
-  .btn-rojo:hover { background: rgba(239,68,68,0.2); }
-  .btn-ghost { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
-  .btn-ghost:hover { background: var(--border); color: var(--text); }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
-
-  /* ── PANEL ── */
-  .panel { display: none; min-height: 100vh; }
-  .panel.activo { display: block; animation: fadeIn 0.3s ease both; }
-
-  /* ── NAVBAR ── */
-  .navbar {
-    background: var(--surface); border-bottom: 1px solid var(--border);
-    padding: 0 24px; display: flex; justify-content: space-between; align-items: center;
-    position: sticky; top: 0; z-index: 100; height: 60px;
-    backdrop-filter: blur(12px);
-  }
-  .navbar-brand { display: flex; align-items: center; gap: 10px; }
-  .brand-icon {
-    width: 32px; height: 32px; background: var(--accent); border-radius: 8px;
-    display: flex; align-items: center; justify-content: center; font-size: 15px; color: white;
-  }
-  .navbar h1 { font-size: 16px; font-weight: 700; color: var(--text); }
-  .navbar-badge {
-    background: var(--accent-glow); color: var(--accent);
-    border: 1px solid rgba(59,130,246,0.3); border-radius: 20px;
-    font-size: 11px; font-weight: 700; padding: 2px 8px; letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-  .navbar-right { display: flex; align-items: center; gap: 12px; }
-  .status-dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; animation: pulse 2s infinite; }
-
-  /* ── TABS ── */
-  .tabs {
-    background: var(--surface); border-bottom: 1px solid var(--border);
-    display: flex; padding: 0 24px; gap: 4px;
-  }
-  .tab {
-    padding: 14px 20px; cursor: pointer; border-bottom: 2px solid transparent;
-    margin-bottom: -1px; color: var(--text-muted); font-size: 13px; font-weight: 500;
-    transition: all 0.2s; display: flex; align-items: center; gap: 7px;
-    white-space: nowrap;
-  }
-  .tab:hover { color: var(--text); }
-  .tab.activo { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-  .tab-icon { font-size: 15px; }
-
-  /* ── CONTENIDO ── */
-  .contenido { padding: 28px 24px; max-width: 960px; margin: 0 auto; }
-  .seccion { display: none; }
-  .seccion.activa { display: block; animation: fadeIn 0.25s ease both; }
-
-  /* ── CARDS ── */
-  .card {
-    background: var(--surface); border-radius: 12px; padding: 20px;
-    margin-bottom: 16px; border: 1px solid var(--border);
-    box-shadow: 0 1px 8px rgba(0,0,0,0.2);
-  }
-  .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
-  .card-title { font-size: 14px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 8px; }
-  .card-icon { font-size: 16px; }
-
-  /* ── FORM ── */
-  .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; align-items: end; }
-  .form-grid .field { margin-bottom: 0; }
-  .form-grid input { width: 100%; padding: 9px 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
-  .form-grid input:focus { outline: none; border-color: var(--accent); }
-  .form-grid input::placeholder { color: var(--text-muted); }
-
-  /* ── MSG ── */
-  .msg { font-size: 13px; margin-top: 10px; padding: 10px 14px; border-radius: 8px; display: none; animation: slideIn 0.2s ease both; }
-  .msg.show { display: flex; align-items: center; gap: 8px; }
-  .msg-ok { background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.2); }
-  .msg-err { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
-
-  /* ── TABLE ── */
-  .tabla-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; min-width: 420px; }
-  th { padding: 11px 12px; text-align: left; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--border); }
-  td { padding: 13px 12px; border-bottom: 1px solid rgba(42,42,56,0.5); vertical-align: middle; color: var(--text); }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(255,255,255,0.02); }
-  .tabla-acciones { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  .tabla-acciones input { width: 90px; padding: 6px 10px; background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; color: var(--text); }
-  .tabla-acciones input:focus { outline: none; border-color: var(--accent); }
-
-  /* ── BADGE ── */
-  .badge { padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
-  .badge-verde { background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.2); }
-  .badge-rojo { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
-  .badge-gris { background: rgba(107,114,128,0.12); color: var(--text-muted); }
-
-  /* ── EMPTY ── */
-  .vacio { text-align: center; color: var(--text-muted); padding: 40px 20px; }
-  .vacio-icon { font-size: 32px; margin-bottom: 10px; opacity: 0.4; }
-  .vacio-text { font-size: 13px; }
-
-  /* ── TOAST ── */
-  #toast {
-    position: fixed; bottom: 24px; right: 24px; z-index: 9999;
-    display: none; align-items: center; gap: 10px;
-    background: var(--surface); border: 1px solid var(--border);
-    padding: 14px 18px; border-radius: 10px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-    font-size: 13px; font-weight: 500;
-    animation: slideIn 0.3s ease both;
-    max-width: 320px;
-  }
-  #toast.show { display: flex; }
-  #toast .toast-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-
-  /* ── LOADING OVERLAY ── */
-  #loadingOverlay {
-    position: fixed; inset: 0; background: rgba(10,10,15,0.85);
-    display: none; align-items: center; justify-content: center;
-    z-index: 999; backdrop-filter: blur(4px); flex-direction: column; gap: 16px;
-  }
-  #loadingOverlay.show { display: flex; }
-  #loadingOverlay p { color: var(--text-muted); font-size: 14px; }
-
-  /* RESPONSIVE */
-  @media (max-width: 600px) {
-    .contenido { padding: 16px 12px; }
-    .tabs { padding: 0 12px; }
-    .navbar { padding: 0 16px; }
-    .tab { padding: 12px 14px; }
-    .form-grid { grid-template-columns: 1fr 1fr; }
-    .navbar-badge { display: none; }
-  }
-</style>
-</head>
-<body>
-
-<!-- TOAST -->
-<div id="toast">
-  <div class="toast-dot" id="toastDot"></div>
-  <span id="toastMsg"></span>
-</div>
-
-<!-- LOADING OVERLAY -->
-<div id="loadingOverlay">
-  <div class="spinner spinner-lg"></div>
-  <p id="loadingText">Cargando...</p>
-</div>
-
-<!-- LOGIN -->
-<div id="loginWrap" class="login-wrap">
-  <div class="login-box">
-    <div class="login-logo">⚡</div>
-    <h2>Panel Admin</h2>
-    <p class="sub">Acceso restringido al administrador</p>
-    <div class="field">
-      <label>Usuario</label>
-      <input type="text" id="loginUser" placeholder="admin">
-    </div>
-    <div class="field">
-      <label>Contraseña</label>
-      <input type="password" id="loginPass" placeholder="••••••••">
-    </div>
-    <button class="btn btn-primary" id="btnLogin" onclick="login()">
-      Ingresar
-    </button>
-    <p id="loginErr" class="msg msg-err" style="margin-top:12px"></p>
-  </div>
-</div>
-
-<!-- PANEL -->
-<div id="panel" class="panel">
-  <nav class="navbar">
-    <div class="navbar-brand">
-      <div class="brand-icon">⚡</div>
-      <h1>Recargas</h1>
-      <span class="navbar-badge">Admin</span>
-    </div>
-    <div class="navbar-right">
-      <div class="status-dot" title="Sistema activo"></div>
-      <button class="btn btn-sm btn-ghost" onclick="cerrarSesion()">Salir</button>
-    </div>
-  </nav>
-
-  <div class="tabs">
-    <div class="tab activo" onclick="cambiarTab('usuarios')" id="tab-usuarios">
-      <span class="tab-icon">👥</span> Usuarios
-    </div>
-    <div class="tab" onclick="cambiarTab('tarjetas')" id="tab-tarjetas">
-      <span class="tab-icon">💳</span> Tarjetas
-    </div>
-    <div class="tab" onclick="cambiarTab('historial')" id="tab-historial">
-      <span class="tab-icon">📋</span> Historial
-    </div>
-  </div>
-
-  <div class="contenido">
-
-    <!-- USUARIOS -->
-    <div id="sec-usuarios" class="seccion activa">
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title"><span class="card-icon">➕</span> Crear usuario</span>
-        </div>
-        <div class="form-grid">
-          <div class="field">
-            <label>Usuario</label>
-            <input type="text" id="nuevoUser" placeholder="nombre">
-          </div>
-          <div class="field">
-            <label>Contraseña</label>
-            <input type="password" id="nuevoPass" placeholder="••••••">
-          </div>
-          <div class="field">
-            <label>Saldo inicial</label>
-            <input type="number" id="nuevoSaldo" placeholder="0">
-          </div>
-          <div class="field" style="align-self:end">
-            <button class="btn btn-verde btn-sm" onclick="crearUsuario()" id="btnCrearUser">
-              Crear usuario
-            </button>
-          </div>
-        </div>
-        <div id="msgUsuario" class="msg"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title"><span class="card-icon">👥</span> Usuarios registrados</span>
-          <button class="btn btn-sm btn-ghost" onclick="cargarUsuarios()">↻ Actualizar</button>
-        </div>
-        <div class="tabla-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Usuario</th>
-                <th>Saldo</th>
-                <th>Estado</th>
-                <th>Acciones</th>
-              </tr>
-            </thead>
-            <tbody id="tablaUsuarios">
-              <tr><td colspan="4"><div class="skeleton skel-row"></div><div class="skeleton skel-row"></div><div class="skeleton skel-sm"></div></td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- TARJETAS -->
-    <div id="sec-tarjetas" class="seccion">
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title"><span class="card-icon">➕</span> Agregar tarjeta</span>
-        </div>
-        <div class="form-grid">
-          <div class="field" style="grid-column: span 2">
-            <label>Número</label>
-            <input type="text" id="tNumero" placeholder="1234 5678 9012 3456">
-          </div>
-          <div class="field">
-            <label>Mes</label>
-            <input type="text" id="tMes" placeholder="MM">
-          </div>
-          <div class="field">
-            <label>Año</label>
-            <input type="text" id="tAnio" placeholder="AA">
-          </div>
-          <div class="field">
-            <label>CVV</label>
-            <input type="text" id="tCvv" placeholder="•••">
-          </div>
-          <div class="field" style="grid-column: span 2">
-            <label>Descripción</label>
-            <input type="text" id="tDesc" placeholder="Ej: Tarjeta principal">
-          </div>
-          <div class="field" style="align-self:end">
-            <button class="btn btn-verde btn-sm" onclick="agregarTarjeta()">
-              Agregar tarjeta
-            </button>
-          </div>
-        </div>
-        <div id="msgTarjeta" class="msg"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title"><span class="card-icon">💳</span> Tarjetas registradas</span>
-          <button class="btn btn-sm btn-ghost" onclick="cargarTarjetas()">↻ Actualizar</button>
-        </div>
-        <div class="tabla-wrap">
-          <table>
-            <thead>
-              <tr><th>Número</th><th>Vence</th><th>Descripción</th><th>Estado</th><th>Acciones</th></tr>
-            </thead>
-            <tbody id="tablaTarjetas">
-              <tr><td colspan="5"><div class="skeleton skel-row"></div><div class="skeleton skel-sm"></div></td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- HISTORIAL -->
-    <div id="sec-historial" class="seccion">
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title"><span class="card-icon">📋</span> Últimas recargas</span>
-          <button class="btn btn-sm btn-ghost" onclick="cargarHistorial()">↻ Actualizar</button>
-        </div>
-        <div class="tabla-wrap">
-          <table>
-            <thead>
-              <tr><th>Fecha</th><th>Usuario</th><th>Servicio</th><th>Número</th><th>Monto</th><th>Estado</th></tr>
-            </thead>
-            <tbody id="tablaHistorial">
-              <tr><td colspan="6"><div class="skeleton skel-row"></div><div class="skeleton skel-row"></div><div class="skeleton skel-sm"></div></td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-  </div>
-</div>
-
-<script>
-let TOKEN = localStorage.getItem('adminToken')
-let toastTimer = null
-
-// ── HELPERS ──
-function showToast(msg, ok) {
-  const el = document.getElementById('toast')
-  const dot = document.getElementById('toastDot')
-  document.getElementById('toastMsg').textContent = msg
-  dot.style.background = ok ? 'var(--green)' : 'var(--red)'
-  el.classList.add('show')
-  clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => el.classList.remove('show'), 3500)
+menu_main() {
+  while true; do
+    echo ""
+    echo "  ╔═══════════════════════════╗"
+    echo "  ║     BlackTunnel Server    ║"
+    echo "  ╠═══════════════════════════╣"
+    echo "  ║  1. Instalar / Actualizar ║"
+    echo "  ║  2. Reiniciar servicios   ║"
+    echo "  ║  0. Salir                 ║"
+    echo "  ╚═══════════════════════════╝"
+    printf "  › "; read -r op
+    case "$op" in
+      1) do_install ;;
+      2) do_restart ;;
+      0) exit 0 ;;
+    esac
+  done
 }
 
-function showLoading(text) {
-  document.getElementById('loadingText').textContent = text || 'Cargando...'
-  document.getElementById('loadingOverlay').classList.add('show')
+do_install() {
+  echo ""
+  echo "[*] Dependencias..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y -q 2>/dev/null || true
+  apt-get install -y -q -o Dpkg::Options::="--force-confold" gcc curl ca-certificates 2>/dev/null || \
+  apt-get install -y gcc curl ca-certificates
+
+  echo "[*] Red BBR..."
+  cat > /etc/sysctl.d/99-bt.conf << 'EOF'
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 131072 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_autocorking=0
+net.core.somaxconn=65535
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=10
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.ip_local_port_range=1024 65535
+EOF
+  sysctl -p /etc/sysctl.d/99-bt.conf 2>/dev/null || true
+  modprobe tcp_bbr 2>/dev/null || true
+
+  echo "[*] sing-box..."
+  if [ ! -f /usr/bin/sing-box ] && [ ! -f /usr/local/bin/sing-box ]; then
+    bash <(curl -fsSL https://sing-box.app/install.sh)
+  else
+    echo "    ya instalado"
+  fi
+
+  mkdir -p /etc/sing-box /opt/vproxy/bin /var/lib/vproxy
+
+  # ── none :8443 — sin filtros (94.140.14.140) ───────────────────
+  cat > /etc/sing-box/config-none.json << CFGEOF
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "dns-none",
+        "server": "94.140.14.140"
+      }
+    ],
+    "final": "dns-none"
+  },
+  "inbounds": [{
+    "type": "vless",
+    "listen": "127.0.0.1",
+    "listen_port": 8443,
+    "users": [{"uuid": "${VLESS_UUID}"}],
+    "multiplex": { "enabled": true }
+  }],
+  "outbounds": [{"type": "direct", "tag": "direct"}]
 }
-function hideLoading() {
-  document.getElementById('loadingOverlay').classList.remove('show')
+CFGEOF
+
+  # ── normal :8444 — bloquea ads/tracking (94.140.14.14) ─────────
+  cat > /etc/sing-box/config-normal.json << CFGEOF
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "dns-normal",
+        "server": "94.140.14.14"
+      }
+    ],
+    "final": "dns-normal"
+  },
+  "inbounds": [{
+    "type": "vless",
+    "listen": "127.0.0.1",
+    "listen_port": 8444,
+    "users": [{"uuid": "${VLESS_UUID}"}],
+    "multiplex": { "enabled": true }
+  }],
+  "outbounds": [{"type": "direct", "tag": "direct"}]
+}
+CFGEOF
+
+  # ── family :8445 — bloquea ads + adulto (94.140.14.15) ─────────
+  cat > /etc/sing-box/config-family.json << CFGEOF
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "dns-family",
+        "server": "94.140.14.15"
+      }
+    ],
+    "final": "dns-family"
+  },
+  "inbounds": [{
+    "type": "vless",
+    "listen": "127.0.0.1",
+    "listen_port": 8445,
+    "users": [{"uuid": "${VLESS_UUID}"}],
+    "multiplex": { "enabled": true }
+  }],
+  "outbounds": [{"type": "direct", "tag": "direct"}]
+}
+CFGEOF
+
+  echo "[*] Compilando vproxy..."
+  cat > /opt/vproxy/vproxy.c << 'CSRC'
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <time.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <sys/epoll.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/timerfd.h>
+
+#define WS_PORT        80
+#define VL_HOST        "127.0.0.1"
+#define VL_PORT_NONE   8443
+#define VL_PORT_NORMAL 8444
+#define VL_PORT_FAMILY 8445
+#define BUF            65536
+#define MAXEV          4096
+#define IDLE_SEC       300
+#define MAXCONNS       8192
+
+static char g_central[256] = "central.brawlpass.com.ar";
+static int  g_central_port = 80;
+static int  g_active = 0;
+static pthread_mutex_t g_alock = PTHREAD_MUTEX_INITIALIZER;
+
+static inline void active_inc(void){ pthread_mutex_lock(&g_alock); g_active++; pthread_mutex_unlock(&g_alock); }
+static inline void active_dec(void){ pthread_mutex_lock(&g_alock); if(g_active>0)g_active--; pthread_mutex_unlock(&g_alock); }
+static inline int  active_get(void){ pthread_mutex_lock(&g_alock); int v=g_active; pthread_mutex_unlock(&g_alock); return v; }
+
+typedef struct cn {
+    int        cfd, tfd, ep, tunneling, is_vside;
+    time_t     la;
+    char       hw[128], hdr[8192];
+    int        hl;
+    struct cn *peer;
+} cn_t;
+
+static cn_t           *g_conns[MAXCONNS];
+static int             g_nconns = 0;
+static pthread_mutex_t g_connlock = PTHREAD_MUTEX_INITIALIZER;
+static void cn_close(cn_t *c);
+
+static void conn_reg(cn_t *c){
+    pthread_mutex_lock(&g_connlock);
+    if(g_nconns<MAXCONNS) g_conns[g_nconns++]=c;
+    pthread_mutex_unlock(&g_connlock);
+}
+static void conn_unreg(cn_t *c){
+    pthread_mutex_lock(&g_connlock);
+    for(int i=0;i<g_nconns;i++) if(g_conns[i]==c){g_conns[i]=g_conns[--g_nconns];break;}
+    pthread_mutex_unlock(&g_connlock);
 }
 
-function showMsg(id, text, ok) {
-  const el = document.getElementById(id)
-  el.textContent = text
-  el.className = 'msg show ' + (ok ? 'msg-ok' : 'msg-err')
-  setTimeout(() => { el.classList.remove('show'); el.textContent = '' }, 4000)
-}
+typedef struct {
+    char   hw[128];
+    cn_t  *conn_main;
+    cn_t  *conn_fast;
+} slot_t;
 
-function skeletonRows(cols) {
-  return `<tr><td colspan="${cols}"><div class="skeleton skel-row"></div><div class="skeleton skel-row"></div><div class="skeleton skel-sm"></div></td></tr>`
-}
+static slot_t          slots[4096];
+static int             nslots = 0;
+static pthread_mutex_t slotlock = PTHREAD_MUTEX_INITIALIZER;
 
-function emptyRow(cols, msg) {
-  return `<tr><td colspan="${cols}"><div class="vacio"><div class="vacio-icon">📭</div><div class="vacio-text">${msg}</div></div></td></tr>`
+static slot_t *slot_find(const char *hw){
+    for(int i=0;i<nslots;i++) if(!strcmp(slots[i].hw,hw)) return &slots[i];
+    return NULL;
 }
-
-// ── API ──
-async function api(url, method, body) {
-  method = method || 'GET'
-  const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN } }
-  if (body) opts.body = JSON.stringify(body)
-  const r = await fetch(url, opts)
-  return r.json()
-}
-
-// ── AUTH ──
-async function login() {
-  const usuario = document.getElementById('loginUser').value.trim()
-  const password = document.getElementById('loginPass').value
-  if (!usuario || !password) return
-  const btn = document.getElementById('btnLogin')
-  btn.disabled = true
-  btn.innerHTML = '<span class="spinner"></span> Ingresando...'
-  const errEl = document.getElementById('loginErr')
-  errEl.classList.remove('show')
-  try {
-    const r = await fetch('/api/admin/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ usuario, password })
-    }).then(r => r.json())
-    if (r.token) {
-      TOKEN = r.token
-      localStorage.setItem('adminToken', TOKEN)
-      mostrarPanel()
-    } else {
-      errEl.textContent = r.error || 'Credenciales incorrectas'
-      errEl.classList.add('show')
+static cn_t *slot_replace(const char *hw, cn_t *c, int is_fast){
+    pthread_mutex_lock(&slotlock);
+    slot_t *s=slot_find(hw);
+    if(!s&&nslots<4096){
+        s=&slots[nslots++];
+        memset(s,0,sizeof(*s));
+        strncpy(s->hw,hw,127);
     }
-  } catch(e) {
-    errEl.textContent = 'Error de conexión'
-    errEl.classList.add('show')
-  }
-  btn.disabled = false
-  btn.innerHTML = 'Ingresar'
+    cn_t *old=NULL;
+    if(s){
+        if(is_fast){ old=s->conn_fast; s->conn_fast=c; }
+        else       { old=s->conn_main; s->conn_main=c; }
+    }
+    pthread_mutex_unlock(&slotlock);
+    return old;
+}
+static void slot_remove(const char *hw, cn_t *c){
+    if(!hw||!hw[0]) return;
+    pthread_mutex_lock(&slotlock);
+    slot_t *s=slot_find(hw);
+    if(s){
+        if(s->conn_main==c) s->conn_main=NULL;
+        if(s->conn_fast==c) s->conn_fast=NULL;
+    }
+    pthread_mutex_unlock(&slotlock);
+}
+static void fd_nodelay(int fd){
+    int v=1, buf=131072;
+    setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&v,sizeof(v));
+    setsockopt(fd,IPPROTO_TCP,TCP_QUICKACK,&v,sizeof(v));
+    setsockopt(fd,SOL_SOCKET,SO_SNDBUF,&buf,sizeof(buf));
+    setsockopt(fd,SOL_SOCKET,SO_RCVBUF,&buf,sizeof(buf));
+}
+static void hget(const char *h, const char *k, char *out, int sz){
+    out[0]=0;
+    const char *p=strcasestr(h,k); if(!p) return;
+    p+=strlen(k); while(*p==' ') p++;
+    int i=0; while(*p&&*p!='\r'&&*p!='\n'&&i<sz-1) out[i++]=*p++;
+    out[i]=0;
+}
+static void send101(int fd, const char *extra){
+    char buf[2048];
+    snprintf(buf,sizeof(buf),
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        "%s\r\n", extra?extra:"");
+    send(fd,buf,strlen(buf),MSG_NOSIGNAL);
+}
+static void arm_timerfd(cn_t *c){
+    if(c->tfd>=0) return;
+    int tfd=timerfd_create(CLOCK_MONOTONIC,TFD_NONBLOCK|TFD_CLOEXEC);
+    if(tfd<0) return;
+    struct itimerspec it={{0},{IDLE_SEC,0}};
+    timerfd_settime(tfd,0,&it,NULL);
+    struct epoll_event te={.events=EPOLLIN,.data.fd=tfd};
+    epoll_ctl(c->ep,EPOLL_CTL_ADD,tfd,&te);
+    c->tfd=tfd;
+}
+static void cn_close(cn_t *c){
+    if(!c) return;
+    if(c->hw[0]) slot_remove(c->hw,c);
+    if(c->peer){ cn_t *p=c->peer; c->peer=NULL; p->peer=NULL; cn_close(p); }
+    conn_unreg(c);
+    if(c->tunneling&&!c->is_vside) active_dec();
+    if(c->tfd>=0){ epoll_ctl(c->ep,EPOLL_CTL_DEL,c->tfd,NULL); close(c->tfd); c->tfd=-1; }
+    if(c->cfd>=0){ epoll_ctl(c->ep,EPOLL_CTL_DEL,c->cfd,NULL); close(c->cfd); c->cfd=-1; }
+    free(c);
+}
+static int verify_central(const char *hw, char *out, int outsz){
+    out[0]=0;
+    struct addrinfo hints={0},*res=NULL;
+    hints.ai_socktype=SOCK_STREAM;
+    char port_str[16]; snprintf(port_str,sizeof(port_str),"%d",g_central_port);
+    if(getaddrinfo(g_central,port_str,&hints,&res)!=0) return 0;
+    int fd=-1;
+    for(struct addrinfo *r=res;r;r=r->ai_next){
+        fd=socket(r->ai_family,r->ai_socktype|SOCK_CLOEXEC,r->ai_protocol);
+        if(fd<0) continue;
+        struct timeval tv={5,0};
+        setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));
+        setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));
+        if(connect(fd,r->ai_addr,r->ai_addrlen)==0) break;
+        close(fd); fd=-1;
+    }
+    freeaddrinfo(res);
+    if(fd<0) return 0;
+    char req[512];
+    snprintf(req,sizeof(req),
+        "BT-VERIFY / HTTP/1.1\r\nHost: %s\r\nAuth: %s\r\n\r\n",
+        g_central,hw);
+    send(fd,req,strlen(req),MSG_NOSIGNAL);
+    char buf[4096]={0}; int len=0;
+    while(len<(int)sizeof(buf)-1){
+        ssize_t r=recv(fd,buf+len,sizeof(buf)-1-len,0);
+        if(r<=0) break;
+        len+=r; buf[len]=0;
+        if(strstr(buf,"\r\n\r\n")) break;
+    }
+    close(fd);
+    if(!len) return 0;
+    char status[32]={0};
+    hget(buf,"X-Status:",status,sizeof(status));
+    if(strcasecmp(status,"OK")!=0) return 0;
+    char name[64]={0},expire[32]={0},days[16]={0},premium[4]={0},created[32]={0};
+    hget(buf,"X-Name:",     name,    sizeof(name));
+    hget(buf,"X-Expire:",   expire,  sizeof(expire));
+    hget(buf,"X-Days-Left:",days,    sizeof(days));
+    hget(buf,"X-Premium:",  premium, sizeof(premium));
+    hget(buf,"X-Created:",  created, sizeof(created));
+    snprintf(out,outsz,
+        "X-Status: OK\r\nX-Name: %s\r\nX-Expire: %s\r\n"
+        "X-Days-Left: %s\r\nX-Premium: %s\r\nX-Created: %s\r\n",
+        name,expire,days,premium,created);
+    return 1;
+}
+static int dns_port(const char *mode){
+    if(!strcasecmp(mode,"normal")) return VL_PORT_NORMAL;
+    if(!strcasecmp(mode,"family")) return VL_PORT_FAMILY;
+    return VL_PORT_NONE;
+}
+static void do_tunnel(cn_t *c, int ep, const char *hw,
+                      const char *extra, int is_fast, int vl_port){
+    cn_t *old=slot_replace(hw,c,is_fast);
+    if(old&&old!=c){ active_dec(); cn_close(old); }
+    strncpy(c->hw,hw,127);
+    int vfd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
+    fd_nodelay(vfd);
+    struct sockaddr_in vsa={.sin_family=AF_INET,.sin_port=htons(vl_port),
+                             .sin_addr.s_addr=inet_addr(VL_HOST)};
+    if(connect(vfd,(struct sockaddr*)&vsa,sizeof(vsa))<0&&errno!=EINPROGRESS){
+        close(vfd); slot_remove(hw,c); c->hw[0]=0;
+        send101(c->cfd,"X-Status: ERROR\r\n"); cn_close(c); return;
+    }
+    char full[600];
+    snprintf(full,sizeof(full),"%sX-Active: %d\r\n",extra,active_get()+1);
+    active_inc();
+    send101(c->cfd,full);
+    cn_t *vconn=calloc(1,sizeof(*vconn));
+    vconn->cfd=vfd; vconn->tfd=-1; vconn->ep=ep;
+    vconn->tunneling=1; vconn->is_vside=1;
+    vconn->la=time(NULL); vconn->peer=c;
+    conn_reg(vconn);
+    c->tunneling=1; c->is_vside=0; c->peer=vconn; c->hl=0;
+    memset(c->hdr,0,sizeof(c->hdr));
+    arm_timerfd(c);
+    struct epoll_event ve={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=vconn};
+    epoll_ctl(ep,EPOLL_CTL_ADD,vfd,&ve);
+    struct epoll_event ce={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=c};
+    epoll_ctl(ep,EPOLL_CTL_MOD,c->cfd,&ce);
+}
+int main(void){
+    signal(SIGPIPE,SIG_IGN);
+    FILE *cf=fopen("/var/lib/vproxy/config","r");
+    if(cf){
+        char line[256];
+        while(fgets(line,sizeof(line),cf)){
+            line[strcspn(line,"\r\n")]=0;
+            if(strncmp(line,"CENTRAL=",8)==0)
+                snprintf(g_central,sizeof(g_central),"%s",line+8);
+            else if(strncmp(line,"CENTRAL_PORT=",13)==0)
+                g_central_port=atoi(line+13);
+        }
+        fclose(cf);
+    }
+    int lfd=socket(AF_INET6,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
+    if(lfd<0) lfd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
+    int v=1;
+    setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,&v,sizeof(v));
+    setsockopt(lfd,SOL_SOCKET,SO_REUSEPORT,&v,sizeof(v));
+    struct sockaddr_in6 sa6={.sin6_family=AF_INET6,.sin6_port=htons(WS_PORT),.sin6_addr=in6addr_any};
+    if(bind(lfd,(struct sockaddr*)&sa6,sizeof(sa6))<0){
+        struct sockaddr_in sa4={.sin_family=AF_INET,.sin_port=htons(WS_PORT),.sin_addr.s_addr=INADDR_ANY};
+        bind(lfd,(struct sockaddr*)&sa4,sizeof(sa4));
+    }
+    listen(lfd,65535);
+    int ep=epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event le={.events=EPOLLIN,.data.fd=lfd};
+    epoll_ctl(ep,EPOLL_CTL_ADD,lfd,&le);
+    static char buf[BUF];
+    struct epoll_event evs[MAXEV];
+    for(;;){
+        int n=epoll_wait(ep,evs,MAXEV,5000);
+        time_t now=time(NULL);
+        pthread_mutex_lock(&g_connlock);
+        for(int i=0;i<g_nconns;i++){
+            cn_t *c=g_conns[i];
+            if(c&&c->tunneling&&(now-c->la)>IDLE_SEC){
+                pthread_mutex_unlock(&g_connlock);
+                cn_close(c);
+                pthread_mutex_lock(&g_connlock);
+                i--;
+            }
+        }
+        pthread_mutex_unlock(&g_connlock);
+        for(int i=0;i<n;i++){
+            uint32_t e=evs[i].events;
+            if(evs[i].data.fd==lfd){
+                for(;;){
+                    int cfd=accept4(lfd,NULL,NULL,SOCK_NONBLOCK|SOCK_CLOEXEC);
+                    if(cfd<0) break;
+                    fd_nodelay(cfd);
+                    cn_t *c=calloc(1,sizeof(*c));
+                    c->cfd=cfd; c->tfd=-1; c->ep=ep; c->la=now;
+                    conn_reg(c);
+                    struct epoll_event ce={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=c};
+                    epoll_ctl(ep,EPOLL_CTL_ADD,cfd,&ce);
+                }
+                continue;
+            }
+            int is_timer=0;
+            pthread_mutex_lock(&g_connlock);
+            for(int j=0;j<g_nconns;j++){
+                if(g_conns[j]&&g_conns[j]->tfd==evs[i].data.fd){
+                    cn_t *c=g_conns[j];
+                    pthread_mutex_unlock(&g_connlock);
+                    uint64_t d; read(c->tfd,&d,8);
+                    cn_close(c); is_timer=1; break;
+                }
+            }
+            if(!is_timer) pthread_mutex_unlock(&g_connlock);
+            if(is_timer) continue;
+            cn_t *c=evs[i].data.ptr;
+            if(!c||c->cfd<0) continue;
+            if(e&(EPOLLERR|EPOLLHUP|EPOLLRDHUP)){ cn_close(c); continue; }
+            if(c->tunneling){
+                if(!c->peer||c->peer->cfd<0){ cn_close(c); continue; }
+                int dst=c->peer->cfd;
+                for(;;){
+                    ssize_t r=recv(c->cfd,buf,BUF,0);
+                    if(r>0){
+                        ssize_t s=0;
+                        while(s<r){
+                            ssize_t w=send(dst,buf+s,r-s,MSG_NOSIGNAL);
+                            if(w>0){s+=w;continue;}
+                            if(errno==EAGAIN||errno==EWOULDBLOCK) break;
+                            cn_close(c); goto nxt;
+                        }
+                        c->la=now; if(c->peer) c->peer->la=now;
+                        int qa=1; setsockopt(dst,IPPROTO_TCP,TCP_QUICKACK,&qa,sizeof(qa));
+                        continue;
+                    }
+                    if(r==0){ cn_close(c); goto nxt; }
+                    if(errno==EAGAIN||errno==EWOULDBLOCK) break;
+                    cn_close(c); goto nxt;
+                }
+                goto nxt;
+            }
+            if(!(e&EPOLLIN)) goto nxt;
+            {
+                ssize_t r=recv(c->cfd,c->hdr+c->hl,sizeof(c->hdr)-1-c->hl,0);
+                if(r<=0){ cn_close(c); goto nxt; }
+                c->hl+=r; c->hdr[c->hl]=0;
+                if(!strstr(c->hdr,"\r\n\r\n")&&!strstr(c->hdr,"\n\n")) goto nxt;
+                char action[32]={0},hw[128]={0},dns_mode[16]={0};
+                hget(c->hdr,"Action:",   action,   sizeof(action));
+                hget(c->hdr,"Auth:",     hw,        sizeof(hw));
+                hget(c->hdr,"Dns-Mode:", dns_mode,  sizeof(dns_mode));
+                if(!dns_mode[0]) snprintf(dns_mode,sizeof(dns_mode),"none");
+                if(!hw[0]||!action[0]){ cn_close(c); goto nxt; }
+                for(char *p=hw;*p;p++) if(*p=='/'||*p=='.'||*p==' '){ cn_close(c); goto nxt; }
+                if(!strcasecmp(action,"auth")){
+                    char extra[512]={0};
+                    if(!verify_central(hw,extra,sizeof(extra)))
+                        send101(c->cfd,"X-Status: INVALID\r\n");
+                    else
+                        send101(c->cfd,extra);
+                    cn_close(c); goto nxt;
+                }
+                if(!strcasecmp(action,"tunnel")){
+                    char extra[512]={0};
+                    if(!verify_central(hw,extra,sizeof(extra))){
+                        send101(c->cfd,"X-Status: INVALID\r\n");
+                        cn_close(c); goto nxt;
+                    }
+                    do_tunnel(c,ep,hw,extra,0,dns_port(dns_mode));
+                    goto nxt;
+                }
+                if(!strcasecmp(action,"tunnel-fast")){
+                    char extra[512]={0};
+                    if(!verify_central(hw,extra,sizeof(extra))){
+                        send101(c->cfd,"X-Status: INVALID\r\n");
+                        cn_close(c); goto nxt;
+                    }
+                    do_tunnel(c,ep,hw,extra,1,dns_port(dns_mode));
+                    goto nxt;
+                }
+                cn_close(c);
+            }
+            nxt:;
+        }
+    }
+    return 0;
+}
+CSRC
+
+  gcc -O3 -march=native -o "$VPROXY_BIN" /opt/vproxy/vproxy.c -lpthread
+  chmod 755 "$VPROXY_BIN"
+  echo "[✓] vproxy compilado"
+
+  cat > /var/lib/vproxy/config << EOF
+CENTRAL=${CENTRAL_HOST}
+CENTRAL_PORT=${CENTRAL_PORT}
+EOF
+
+  for mode in none normal family; do
+    cat > /etc/systemd/system/sing-box-${mode}.service << EOF
+[Unit]
+Description=sing-box ${mode}
+After=network.target
+[Service]
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config-${mode}.json
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+  done
+
+  cat > /etc/systemd/system/vproxy.service << EOF
+[Unit]
+Description=BlackTunnel vproxy
+After=network.target sing-box-none.service
+[Service]
+ExecStart=${VPROXY_BIN}
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/bt-watchdog.service << 'EOF'
+[Unit]
+Description=BlackTunnel watchdog
+[Service]
+Type=oneshot
+ExecStart=/opt/vproxy/watchdog.sh
+EOF
+
+  cat > /etc/systemd/system/bt-watchdog.timer << 'EOF'
+[Unit]
+Description=BlackTunnel watchdog
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+[Install]
+WantedBy=timers.target
+EOF
+
+  cat > /opt/vproxy/watchdog.sh << 'EOF'
+#!/bin/bash
+for svc in sing-box-none sing-box-normal sing-box-family vproxy; do
+  systemctl is-active --quiet "$svc" || systemctl restart "$svc"
+done
+EOF
+  chmod +x /opt/vproxy/watchdog.sh
+
+  systemctl daemon-reload
+  systemctl enable sing-box-none sing-box-normal sing-box-family vproxy bt-watchdog.timer
+  systemctl restart sing-box-none sing-box-normal sing-box-family
+  sleep 2
+  systemctl restart vproxy
+  systemctl restart bt-watchdog.timer
+
+  IP=$(hostname -I | awk '{print $1}')
+  echo ""
+  echo "  ════════════════════════════════════"
+  echo "  [✓] BlackTunnel instalado"
+  echo "      IP      : $IP:80"
+  echo "      UUID    : ${VLESS_UUID}"
+  echo "      Central : ${CENTRAL_HOST}:${CENTRAL_PORT}"
+  echo "      none    → :8443  sin filtros"
+  echo "      normal  → :8444  AdGuard ads/tracking"
+  echo "      family  → :8445  AdGuard family"
+  echo "  ════════════════════════════════════"
 }
 
-function cerrarSesion() {
-  localStorage.removeItem('adminToken')
-  location.reload()
+do_restart() {
+  systemctl restart sing-box-none sing-box-normal sing-box-family vproxy 2>/dev/null \
+    && echo "  [✓] Reiniciados" || echo "  [!] Error"
 }
 
-function mostrarPanel() {
-  document.getElementById('loginWrap').style.display = 'none'
-  document.getElementById('panel').classList.add('activo')
-  cargarUsuarios()
-}
-
-function cambiarTab(tab) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('activo'))
-  document.getElementById('tab-' + tab).classList.add('activo')
-  document.querySelectorAll('.seccion').forEach(s => s.classList.remove('activa'))
-  document.getElementById('sec-' + tab).classList.add('activa')
-  if (tab === 'usuarios') cargarUsuarios()
-  if (tab === 'tarjetas') cargarTarjetas()
-  if (tab === 'historial') cargarHistorial()
-}
-
-// ── USUARIOS ──
-async function cargarUsuarios() {
-  const tbody = document.getElementById('tablaUsuarios')
-  tbody.innerHTML = skeletonRows(4)
-  try {
-    const rows = await api('/api/admin/usuarios')
-    if (!rows.length) { tbody.innerHTML = emptyRow(4, 'Sin usuarios registrados'); return }
-    tbody.innerHTML = rows.map(u => `
-      <tr>
-        <td><span style="font-weight:600">${u.usuario}</span></td>
-        <td style="font-family:monospace; font-size:15px; color:var(--accent)">$${Number(u.saldo).toLocaleString('es-AR')}</td>
-        <td><span class="badge ${u.activo ? 'badge-verde' : 'badge-rojo'}">${u.activo ? '● Activo' : '○ Inactivo'}</span></td>
-        <td>
-          <div class="tabla-acciones">
-            <input type="number" id="s${u.id}" value="${u.saldo}" title="Nuevo saldo">
-            <button class="btn btn-verde btn-sm" onclick="actualizarSaldo(${u.id})">Guardar</button>
-            <button class="btn btn-sm ${u.activo ? 'btn-rojo' : 'btn-verde'}" onclick="toggleActivo(${u.id},${u.activo ? 0 : 1})">${u.activo ? 'Desactivar' : 'Activar'}</button>
-            <button class="btn btn-rojo btn-sm" onclick="eliminarUsuario(${u.id})">Eliminar</button>
-          </div>
-        </td>
-      </tr>`).join('')
-  } catch(e) {
-    tbody.innerHTML = emptyRow(4, 'Error al cargar usuarios')
-  }
-}
-
-async function crearUsuario() {
-  const usuario = document.getElementById('nuevoUser').value.trim()
-  const password = document.getElementById('nuevoPass').value
-  const saldo = parseFloat(document.getElementById('nuevoSaldo').value) || 0
-  const btn = document.getElementById('btnCrearUser')
-  btn.disabled = true
-  btn.innerHTML = '<span class="spinner"></span>'
-  const r = await api('/api/admin/usuarios', 'POST', { usuario, password, saldo })
-  btn.disabled = false
-  btn.innerHTML = 'Crear usuario'
-  if (r.error) showMsg('msgUsuario', r.error, false)
-  else {
-    showMsg('msgUsuario', '✓ Usuario creado correctamente', true)
-    showToast('Usuario creado: ' + usuario, true)
-    document.getElementById('nuevoUser').value = ''
-    document.getElementById('nuevoPass').value = ''
-    document.getElementById('nuevoSaldo').value = ''
-    cargarUsuarios()
-  }
-}
-
-async function actualizarSaldo(id) {
-  const saldo = parseFloat(document.getElementById('s' + id).value)
-  await api('/api/admin/usuarios/' + id + '/saldo', 'PUT', { saldo })
-  showToast('Saldo actualizado', true)
-  cargarUsuarios()
-}
-
-async function toggleActivo(id, activo) {
-  await api('/api/admin/usuarios/' + id + '/activo', 'PUT', { activo })
-  showToast(activo ? 'Usuario activado' : 'Usuario desactivado', !!activo)
-  cargarUsuarios()
-}
-
-async function eliminarUsuario(id) {
-  if (!confirm('¿Eliminar este usuario? Esta acción no se puede deshacer.')) return
-  showLoading('Eliminando usuario...')
-  await api('/api/admin/usuarios/' + id, 'DELETE')
-  hideLoading()
-  showToast('Usuario eliminado', false)
-  cargarUsuarios()
-}
-
-// ── TARJETAS ──
-async function cargarTarjetas() {
-  const tbody = document.getElementById('tablaTarjetas')
-  tbody.innerHTML = skeletonRows(5)
-  try {
-    const rows = await api('/api/admin/tarjetas')
-    if (!rows.length) { tbody.innerHTML = emptyRow(5, 'Sin tarjetas registradas'); return }
-    tbody.innerHTML = rows.map(t => `
-      <tr>
-        <td style="font-family:monospace; letter-spacing:0.1em">**** **** **** ${t.numero.slice(-4)}</td>
-        <td style="color:var(--text-dim)">${t.mes}/${t.anio}</td>
-        <td style="color:var(--text-dim)">${t.descripcion || '—'}</td>
-        <td><span class="badge ${t.activa ? 'badge-verde' : 'badge-rojo'}">${t.activa ? '● Activa' : '○ Inactiva'}</span></td>
-        <td>
-          <div class="tabla-acciones">
-            <button class="btn btn-sm ${t.activa ? 'btn-ghost' : 'btn-verde'}" onclick="toggleTarjeta(${t.id},${t.activa ? 0 : 1})">${t.activa ? 'Desactivar' : 'Activar'}</button>
-            <button class="btn btn-rojo btn-sm" onclick="eliminarTarjeta(${t.id})">Eliminar</button>
-          </div>
-        </td>
-      </tr>`).join('')
-  } catch(e) {
-    tbody.innerHTML = emptyRow(5, 'Error al cargar tarjetas')
-  }
-}
-
-async function agregarTarjeta() {
-  const r = await api('/api/admin/tarjetas', 'POST', {
-    numero: document.getElementById('tNumero').value.trim(),
-    mes: document.getElementById('tMes').value.trim(),
-    anio: document.getElementById('tAnio').value.trim(),
-    cvv: document.getElementById('tCvv').value.trim(),
-    descripcion: document.getElementById('tDesc').value.trim()
-  })
-  if (r.error) showMsg('msgTarjeta', r.error, false)
-  else {
-    showMsg('msgTarjeta', '✓ Tarjeta agregada correctamente', true)
-    showToast('Tarjeta registrada', true)
-    ;['tNumero','tMes','tAnio','tCvv','tDesc'].forEach(id => document.getElementById(id).value = '')
-    cargarTarjetas()
-  }
-}
-
-async function toggleTarjeta(id, activa) {
-  await api('/api/admin/tarjetas/' + id + '/activa', 'PUT', { activa })
-  showToast(activa ? 'Tarjeta activada' : 'Tarjeta desactivada', !!activa)
-  cargarTarjetas()
-}
-
-async function eliminarTarjeta(id) {
-  if (!confirm('¿Eliminar esta tarjeta?')) return
-  await api('/api/admin/tarjetas/' + id, 'DELETE')
-  showToast('Tarjeta eliminada', false)
-  cargarTarjetas()
-}
-
-// ── HISTORIAL ──
-async function cargarHistorial() {
-  const tbody = document.getElementById('tablaHistorial')
-  tbody.innerHTML = skeletonRows(6)
-  try {
-    const rows = await api('/api/admin/historial')
-    if (!rows.length) { tbody.innerHTML = emptyRow(6, 'Sin recargas registradas'); return }
-    tbody.innerHTML = rows.map(h => {
-      const fecha = new Date(h.fecha).toLocaleString('es-AR', {
-        timeZone: 'America/Argentina/Buenos_Aires',
-        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-      })
-      const ok = h.estado === 'exitoso'
-      return `<tr>
-        <td style="color:var(--text-muted); font-size:12px">${fecha}</td>
-        <td style="font-weight:600">${h.usuario || '—'}</td>
-        <td style="text-transform:capitalize; color:var(--text-dim)">${h.servicio}</td>
-        <td style="font-family:monospace">${h.numero_destino}</td>
-        <td style="font-family:monospace; color:var(--accent); font-weight:700">$${Number(h.monto).toLocaleString('es-AR')}</td>
-        <td><span class="badge ${ok ? 'badge-verde' : 'badge-rojo'}">${ok ? '✓ Exitosa' : '✗ Fallida'}</span></td>
-      </tr>`
-    }).join('')
-  } catch(e) {
-    tbody.innerHTML = emptyRow(6, 'Error al cargar historial')
-  }
-}
-
-// ── INIT ──
-if (TOKEN) mostrarPanel()
-
-document.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && document.getElementById('loginWrap').style.display !== 'none') login()
-})
-</script>
-</body>
-</html>
+case "${1:-}" in
+  install) do_install ;;
+  restart) do_restart ;;
+  "")      menu_main ;;
+esac
