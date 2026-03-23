@@ -6,50 +6,8 @@ CENTRAL_PORT="${CENTRAL_PORT:-80}"
 VPROXY_BIN="${VPROXY_BIN:-/opt/vproxy/bin/vproxy}"
 BLACKMUX_PORT=8443
 
-do_install() {
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y -q || true
-  apt-get install -y -q -o Dpkg::Options::="--force-confold" \
-    gcc curl ca-certificates python3 python3-pip || \
-  apt-get install -y gcc curl ca-certificates python3 python3-pip
-
-  cat > /etc/sysctl.d/99-bt.conf << 'EOF'
-net.core.rmem_max=134217728
-net.core.wmem_max=134217728
-net.ipv4.tcp_rmem=4096 131072 134217728
-net.ipv4.tcp_wmem=4096 65536 134217728
-net.ipv4.tcp_congestion_control=bbr
-net.core.default_qdisc=fq
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_slow_start_after_idle=0
-net.ipv4.tcp_autocorking=0
-net.core.somaxconn=65535
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_fin_timeout=10
-net.ipv4.tcp_keepalive_time=60
-net.ipv4.tcp_keepalive_intvl=10
-net.ipv4.tcp_keepalive_probes=6
-net.ipv4.tcp_max_syn_backlog=65535
-net.ipv4.ip_local_port_range=1024 65535
-EOF
-  sysctl -p /etc/sysctl.d/99-bt.conf || true
-  modprobe tcp_bbr || true
-
-  mkdir -p /opt/vproxy/bin /opt/blackmux /var/lib/vproxy
-
-  # ── BlackMux server en Python ─────────────────────────────────────────────
-  cat > /opt/blackmux/server.py << 'PYEOF'
-"""
-BlackMux Server — protocolo BlackMuxBridge
-
-Header: 7 bytes
-  [0-1] payload_length  (uint16 big-endian)
-  [2-4] stream_id       (uint24 big-endian)
-  [5]   protocol        (0x01=TCP, 0x02=UDP)
-  [6]   command         (0x01=OPEN, 0x02=DATA, 0x03=CLOSE)
-
-CMD_OPEN payload: destino SOCKS5 ATYP+ADDR+PORT
-"""
+write_python() {
+cat > /opt/blackmux/server.py << 'PYEOF'
 import asyncio
 import struct
 import logging
@@ -58,16 +16,16 @@ import sys
 
 logging.basicConfig(
     level=logging.WARNING,
-    format='%(asctime)s %(levelname)s %(message)s',
+    format='%(asctime)s %(levelname)s mux %(message)s',
     stream=sys.stderr
 )
 log = logging.getLogger("blackmux")
 
-CMD_OPEN  = 0x01
-CMD_DATA  = 0x02
-CMD_CLOSE = 0x03
-PROTO_TCP = 0x01
-PROTO_UDP = 0x02
+CMD_OPEN    = 0x01
+CMD_DATA    = 0x02
+CMD_CLOSE   = 0x03
+PROTO_TCP   = 0x01
+PROTO_UDP   = 0x02
 ATYP_IPV4   = 0x01
 ATYP_DOMAIN = 0x03
 ATYP_IPV6   = 0x04
@@ -88,10 +46,12 @@ def build_frame(stream_id, protocol, command, payload=b''):
 async def read_frame(reader):
     header = await reader.readexactly(HEADER_SIZE)
     payload_len = struct.unpack('>H', header[0:2])[0]
-    stream_id = (header[2] << 16) | (header[3] << 8) | header[4]
-    protocol  = header[5]
-    command   = header[6]
-    payload   = await reader.readexactly(payload_len) if payload_len > 0 else b''
+    stream_id   = (header[2] << 16) | (header[3] << 8) | header[4]
+    protocol    = header[5]
+    command     = header[6]
+    if payload_len > 65535:
+        raise Exception(f"payload_len imposible={payload_len} stream={stream_id}")
+    payload = await reader.readexactly(payload_len) if payload_len > 0 else b''
     return stream_id, protocol, command, payload
 
 def parse_destination(data):
@@ -117,14 +77,14 @@ def parse_destination(data):
 
 class TcpStream:
     def __init__(self, stream_id, host, port, trunk_writer, lock):
-        self.stream_id = stream_id
-        self.host = host
-        self.port = port
+        self.stream_id    = stream_id
+        self.host         = host
+        self.port         = port
         self.trunk_writer = trunk_writer
-        self.lock = lock
-        self.reader = None
-        self.writer = None
-        self.closed = False
+        self.lock         = lock
+        self.reader       = None
+        self.writer       = None
+        self.closed       = False
 
     async def connect(self):
         self.reader, self.writer = await asyncio.wait_for(
@@ -177,13 +137,13 @@ class TcpStream:
 
 class UdpStream:
     def __init__(self, stream_id, host, port, trunk_writer, lock):
-        self.stream_id = stream_id
-        self.host = host
-        self.port = port
+        self.stream_id    = stream_id
+        self.host         = host
+        self.port         = port
         self.trunk_writer = trunk_writer
-        self.lock = lock
-        self.transport = None
-        self.closed = False
+        self.lock         = lock
+        self.transport    = None
+        self.closed       = False
 
     async def connect(self):
         loop = asyncio.get_event_loop()
@@ -249,11 +209,11 @@ class _UdpProto(asyncio.DatagramProtocol):
 
 class MuxSession:
     def __init__(self, reader, writer):
-        self.reader = reader
-        self.writer = writer
-        self.lock = asyncio.Lock()
+        self.reader  = reader
+        self.writer  = writer
+        self.lock    = asyncio.Lock()
         self.streams = {}
-        self.closed = False
+        self.closed  = False
 
     async def run(self):
         try:
@@ -278,6 +238,9 @@ class MuxSession:
             stream = self.streams.pop(stream_id, None)
             if stream:
                 await stream.close(notify=False)
+        else:
+            log.warning(f"cmd desconocido={command} stream={stream_id}")
+            raise Exception(f"protocolo corrompido cmd={command} stream={stream_id}")
 
     async def _handle_open(self, stream_id, protocol, payload):
         host, port = parse_destination(payload)
@@ -328,9 +291,10 @@ async def main():
 if __name__ == '__main__':
     asyncio.run(main())
 PYEOF
+}
 
-  # ── vproxy.c — igual que antes, solo cambia VL_PORT a BLACKMUX_PORT ──────
-  cat > /opt/vproxy/vproxy.c << 'CSRC'
+write_c() {
+cat > /opt/vproxy/vproxy.c << 'CSRC'
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -357,17 +321,17 @@ PYEOF
 #define IDLE_SEC  300
 #define MAXCONNS  8192
 
-static char g_central[256] = "central.brawlpass.com.ar";
-static int  g_central_port = 80;
-static int  g_active = 0;
-static pthread_mutex_t g_alock = PTHREAD_MUTEX_INITIALIZER;
+static char g_central[256]   = "central.brawlpass.com.ar";
+static int  g_central_port   = 80;
+static int  g_active         = 0;
+static pthread_mutex_t g_alock    = PTHREAD_MUTEX_INITIALIZER;
 
 static inline void active_inc(void){ pthread_mutex_lock(&g_alock); g_active++; pthread_mutex_unlock(&g_alock); }
 static inline void active_dec(void){ pthread_mutex_lock(&g_alock); if(g_active>0)g_active--; pthread_mutex_unlock(&g_alock); }
 static inline int  active_get(void){ pthread_mutex_lock(&g_alock); int v=g_active; pthread_mutex_unlock(&g_alock); return v; }
 
 typedef struct cn {
-    int        cfd, tfd, ep, tunneling, is_vside;
+    int        cfd, tfd, ep, tunneling, is_vside, vconn_ready;
     time_t     la;
     char       hw[128], hdr[8192], profile[32];
     int        hl;
@@ -407,11 +371,7 @@ static slot_t *slot_find(const char *hw){
 static cn_t *slot_replace(const char *hw, cn_t *c, int is_fast){
     pthread_mutex_lock(&slotlock);
     slot_t *s=slot_find(hw);
-    if(!s&&nslots<4096){
-        s=&slots[nslots++];
-        memset(s,0,sizeof(*s));
-        strncpy(s->hw,hw,127);
-    }
+    if(!s&&nslots<4096){ s=&slots[nslots++]; memset(s,0,sizeof(*s)); strncpy(s->hw,hw,127); }
     cn_t *old=NULL;
     if(s){
         if(is_fast){ old=s->conn_fast; s->conn_fast=c; }
@@ -431,20 +391,20 @@ static void slot_remove(const char *hw, cn_t *c){
     pthread_mutex_unlock(&slotlock);
 }
 static const char *norm_profile(const char *in){
-    if(!in||!in[0]) return "normal";
-    if(!strcasecmp(in,"gaming"))       return "gaming";
+    if(!in||!in[0])              return "normal";
+    if(!strcasecmp(in,"gaming")) return "gaming";
     if(!strcasecmp(in,"conservative")) return "conservative";
     return "normal";
 }
 static void fd_tune(int fd, const char *profile){
     int v=1;
     int snd=131072, rcv=131072;
-    if(!strcasecmp(profile,"gaming")){       snd=262144; rcv=262144; }
-    if(!strcasecmp(profile,"conservative")){ snd=65536;  rcv=65536;  }
-    setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&v,sizeof(v));
+    if(!strcasecmp(profile,"gaming"))       { snd=262144; rcv=262144; }
+    if(!strcasecmp(profile,"conservative")) { snd=65536;  rcv=65536;  }
+    setsockopt(fd,IPPROTO_TCP,TCP_NODELAY, &v,sizeof(v));
     setsockopt(fd,IPPROTO_TCP,TCP_QUICKACK,&v,sizeof(v));
-    setsockopt(fd,SOL_SOCKET,SO_SNDBUF,&snd,sizeof(snd));
-    setsockopt(fd,SOL_SOCKET,SO_RCVBUF,&rcv,sizeof(rcv));
+    setsockopt(fd,SOL_SOCKET, SO_SNDBUF,  &snd,sizeof(snd));
+    setsockopt(fd,SOL_SOCKET, SO_RCVBUF,  &rcv,sizeof(rcv));
 }
 static void hget(const char *h, const char *k, char *out, int sz){
     out[0]=0;
@@ -528,67 +488,121 @@ static int verify_central(const char *hw, char *out, int outsz){
         name,expire,days,premium,created);
     return 1;
 }
-static void do_tunnel(cn_t *c, int ep, const char *hw, const char *profile, const char *extra, int is_fast){
+
+/*
+ * FIX: do_tunnel ahora conecta a BlackMux de forma no bloqueante y NO envía
+ * send101 al cliente hasta que EPOLLOUT confirme que vfd está conectado.
+ * Se guarda el estado pendiente en vconn_ready=0; el loop principal lo
+ * completa al recibir EPOLLOUT en vfd.
+ */
+static void do_tunnel(cn_t *c, int ep, const char *hw, const char *profile,
+                      const char *extra, int is_fast){
     cn_t *old=slot_replace(hw,c,is_fast);
     if(old&&old!=c){ cn_close(old); }
     strncpy(c->hw,hw,127);
     strncpy(c->profile,norm_profile(profile),31);
+
     int vfd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
     fd_tune(vfd,c->profile);
-    struct sockaddr_in vsa={.sin_family=AF_INET,.sin_port=htons(VL_PORT),.sin_addr.s_addr=inet_addr(VL_HOST)};
-    if(connect(vfd,(struct sockaddr*)&vsa,sizeof(vsa))<0&&errno!=EINPROGRESS){
-        close(vfd); slot_remove(hw,c); c->hw[0]=0;
-        send101(c->cfd,"X-Status: ERROR\r\n"); cn_close(c); return;
+    struct sockaddr_in vsa={
+        .sin_family=AF_INET,
+        .sin_port=htons(VL_PORT),
+        .sin_addr.s_addr=inet_addr(VL_HOST)
+    };
+    int rc=connect(vfd,(struct sockaddr*)&vsa,sizeof(vsa));
+    if(rc<0&&errno!=EINPROGRESS){
+        close(vfd);
+        slot_remove(hw,c); c->hw[0]=0;
+        send101(c->cfd,"X-Status: ERROR\r\n");
+        cn_close(c);
+        return;
     }
-    char full[640];
-    snprintf(full,sizeof(full),"%sX-Active: %d\r\nX-Profile: %s\r\n",extra,active_get()+1,c->profile);
-    active_inc();
-    send101(c->cfd,full);
+
     cn_t *vconn=calloc(1,sizeof(*vconn));
     vconn->cfd=vfd; vconn->tfd=-1; vconn->ep=ep;
     vconn->tunneling=1; vconn->is_vside=1;
+    vconn->vconn_ready=0;
     vconn->la=time(NULL); vconn->peer=c;
     strncpy(vconn->profile,c->profile,31);
     conn_reg(vconn);
+
     c->tunneling=1; c->is_vside=0; c->peer=vconn; c->hl=0;
     memset(c->hdr,0,sizeof(c->hdr));
-    arm_timerfd(c);
-    struct epoll_event ve={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=vconn};
+
+    /* Registrar vfd con EPOLLOUT para detectar cuando conecta */
+    struct epoll_event ve={
+        .events=EPOLLOUT|EPOLLIN|EPOLLET|EPOLLRDHUP,
+        .data.ptr=vconn
+    };
     epoll_ctl(ep,EPOLL_CTL_ADD,vfd,&ve);
-    struct epoll_event ce={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=c};
-    epoll_ctl(ep,EPOLL_CTL_MOD,c->cfd,&ce);
+
+    /* El cliente queda sin escucha hasta que vconn_ready=1 */
+    /* No se modifica el epoll del cliente aquí todavía    */
+    if(rc==0){
+        /* conexión inmediata (loopback suele serlo) */
+        vconn->vconn_ready=1;
+        active_inc();
+        char full[640];
+        snprintf(full,sizeof(full),"%sX-Active: %d\r\nX-Profile: %s\r\n",
+                 extra,active_get(),c->profile);
+        send101(c->cfd,full);
+        arm_timerfd(c);
+        struct epoll_event ce={
+            .events=EPOLLIN|EPOLLET|EPOLLRDHUP,
+            .data.ptr=c
+        };
+        epoll_ctl(ep,EPOLL_CTL_MOD,c->cfd,&ce);
+    }
+    /* Si EINPROGRESS: el loop espera EPOLLOUT en vconn y completa allí */
 }
+
 int main(void){
     signal(SIGPIPE,SIG_IGN);
+
     FILE *cf=fopen("/var/lib/vproxy/config","r");
     if(cf){
         char line[256];
         while(fgets(line,sizeof(line),cf)){
             line[strcspn(line,"\r\n")]=0;
-            if(strncmp(line,"CENTRAL=",8)==0) snprintf(g_central,sizeof(g_central),"%s",line+8);
-            else if(strncmp(line,"CENTRAL_PORT=",13)==0) g_central_port=atoi(line+13);
+            if(strncmp(line,"CENTRAL=",8)==0)
+                snprintf(g_central,sizeof(g_central),"%s",line+8);
+            else if(strncmp(line,"CENTRAL_PORT=",13)==0)
+                g_central_port=atoi(line+13);
         }
         fclose(cf);
     }
+
     int lfd=socket(AF_INET6,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
     if(lfd<0) lfd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
     int v=1;
     setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,&v,sizeof(v));
     setsockopt(lfd,SOL_SOCKET,SO_REUSEPORT,&v,sizeof(v));
-    struct sockaddr_in6 sa6={.sin6_family=AF_INET6,.sin6_port=htons(WS_PORT),.sin6_addr=in6addr_any};
+    struct sockaddr_in6 sa6={
+        .sin6_family=AF_INET6,
+        .sin6_port=htons(WS_PORT),
+        .sin6_addr=in6addr_any
+    };
     if(bind(lfd,(struct sockaddr*)&sa6,sizeof(sa6))<0){
-        struct sockaddr_in sa4={.sin_family=AF_INET,.sin_port=htons(WS_PORT),.sin_addr.s_addr=INADDR_ANY};
+        struct sockaddr_in sa4={
+            .sin_family=AF_INET,
+            .sin_port=htons(WS_PORT),
+            .sin_addr.s_addr=INADDR_ANY
+        };
         bind(lfd,(struct sockaddr*)&sa4,sizeof(sa4));
     }
     listen(lfd,65535);
+
     int ep=epoll_create1(EPOLL_CLOEXEC);
     struct epoll_event le={.events=EPOLLIN,.data.fd=lfd};
     epoll_ctl(ep,EPOLL_CTL_ADD,lfd,&le);
+
     static char buf[BUF];
     struct epoll_event evs[MAXEV];
+
     for(;;){
         int n=epoll_wait(ep,evs,MAXEV,5000);
         time_t now=time(NULL);
+
         pthread_mutex_lock(&g_connlock);
         for(int i=0;i<g_nconns;i++){
             cn_t *c=g_conns[i];
@@ -600,8 +614,10 @@ int main(void){
             }
         }
         pthread_mutex_unlock(&g_connlock);
+
         for(int i=0;i<n;i++){
             uint32_t e=evs[i].events;
+
             if(evs[i].data.fd==lfd){
                 for(;;){
                     int cfd=accept4(lfd,NULL,NULL,SOCK_NONBLOCK|SOCK_CLOEXEC);
@@ -611,11 +627,15 @@ int main(void){
                     c->cfd=cfd; c->tfd=-1; c->ep=ep; c->la=now;
                     strcpy(c->profile,"normal");
                     conn_reg(c);
-                    struct epoll_event ce={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.ptr=c};
+                    struct epoll_event ce={
+                        .events=EPOLLIN|EPOLLET|EPOLLRDHUP,
+                        .data.ptr=c
+                    };
                     epoll_ctl(ep,EPOLL_CTL_ADD,cfd,&ce);
                 }
                 continue;
             }
+
             int is_timer=0;
             pthread_mutex_lock(&g_connlock);
             for(int j=0;j<g_nconns;j++){
@@ -628,9 +648,47 @@ int main(void){
             }
             if(!is_timer) pthread_mutex_unlock(&g_connlock);
             if(is_timer) continue;
+
             cn_t *c=evs[i].data.ptr;
             if(!c||c->cfd<0) continue;
             if(e&(EPOLLERR|EPOLLHUP|EPOLLRDHUP)){ cn_close(c); continue; }
+
+            /*
+             * FIX: si es el vconn y aún no está listo (EINPROGRESS),
+             * esperamos EPOLLOUT para confirmar que la conexión a BlackMux
+             * completó antes de habilitar el flujo de datos del cliente.
+             */
+            if(c->tunneling && c->is_vside && !c->vconn_ready){
+                if(e&EPOLLOUT){
+                    int err=0; socklen_t el=sizeof(err);
+                    getsockopt(c->cfd,SOL_SOCKET,SO_ERROR,&err,&el);
+                    if(err!=0){ cn_close(c); continue; }
+                    c->vconn_ready=1;
+                    /* Quitar EPOLLOUT, dejar solo EPOLLIN */
+                    struct epoll_event ve={
+                        .events=EPOLLIN|EPOLLET|EPOLLRDHUP,
+                        .data.ptr=c
+                    };
+                    epoll_ctl(ep,EPOLL_CTL_MOD,c->cfd,&ve);
+                    cn_t *cl=c->peer;
+                    if(!cl||cl->cfd<0){ cn_close(c); continue; }
+                    /* Ahora sí informar al cliente y activar su epoll */
+                    active_inc();
+                    char full[640];
+                    snprintf(full,sizeof(full),
+                        "X-Status: OK\r\nX-Active: %d\r\nX-Profile: %s\r\n",
+                        active_get(),c->profile);
+                    send101(cl->cfd,full);
+                    arm_timerfd(cl);
+                    struct epoll_event ce={
+                        .events=EPOLLIN|EPOLLET|EPOLLRDHUP,
+                        .data.ptr=cl
+                    };
+                    epoll_ctl(ep,EPOLL_CTL_MOD,cl->cfd,&ce);
+                }
+                continue;
+            }
+
             if(c->tunneling){
                 if(!c->peer||c->peer->cfd<0){ cn_close(c); continue; }
                 int dst=c->peer->cfd;
@@ -658,6 +716,7 @@ int main(void){
                 }
                 goto nxt;
             }
+
             if(!(e&EPOLLIN)) goto nxt;
             {
                 ssize_t r=recv(c->cfd,c->hdr+c->hl,sizeof(c->hdr)-1-c->hl,0);
@@ -673,10 +732,12 @@ int main(void){
                 for(char *p=hw;*p;p++) if(*p=='/'||*p=='.'||*p==' '){ cn_close(c); goto nxt; }
                 if(!strcasecmp(action,"auth")){
                     char extra[512]={0};
-                    if(!verify_central(hw,extra,sizeof(extra))) send101(c->cfd,"X-Status: INVALID\r\n");
+                    if(!verify_central(hw,extra,sizeof(extra)))
+                        send101(c->cfd,"X-Status: INVALID\r\n");
                     else{
                         char with_profile[640]={0};
-                        snprintf(with_profile,sizeof(with_profile),"%sX-Profile: %s\r\n",extra,prof);
+                        snprintf(with_profile,sizeof(with_profile),
+                                 "%sX-Profile: %s\r\n",extra,prof);
                         send101(c->cfd,with_profile);
                     }
                     cn_close(c); goto nxt;
@@ -713,6 +774,64 @@ int main(void){
     return 0;
 }
 CSRC
+}
+
+do_patch() {
+  echo "[*] Aplicando patch BlackMux + vproxy..."
+  mkdir -p /opt/vproxy/bin /opt/blackmux /var/lib/vproxy
+
+  write_python
+  echo "[+] server.py actualizado"
+
+  write_c
+  gcc -O3 -o "$VPROXY_BIN" /opt/vproxy/vproxy.c -lpthread
+  chmod 755 "$VPROXY_BIN"
+  echo "[+] vproxy recompilado"
+
+  systemctl daemon-reload
+  systemctl restart blackmux
+  sleep 1
+  systemctl restart vproxy
+  echo "[+] Servicios reiniciados"
+  echo ""
+  echo "  ════════════════════════════════════"
+  echo "  [✓] Patch aplicado correctamente"
+  echo "  ════════════════════════════════════"
+}
+
+do_install() {
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y -q || true
+  apt-get install -y -q -o Dpkg::Options::="--force-confold" \
+    gcc curl ca-certificates python3 python3-pip || \
+  apt-get install -y gcc curl ca-certificates python3 python3-pip
+
+  cat > /etc/sysctl.d/99-bt.conf << 'EOF'
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 131072 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_autocorking=0
+net.core.somaxconn=65535
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=10
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.ip_local_port_range=1024 65535
+EOF
+  sysctl -p /etc/sysctl.d/99-bt.conf || true
+  modprobe tcp_bbr || true
+
+  mkdir -p /opt/vproxy/bin /opt/blackmux /var/lib/vproxy
+
+  write_python
+  write_c
 
   gcc -O3 -o "$VPROXY_BIN" /opt/vproxy/vproxy.c -lpthread
   chmod 755 "$VPROXY_BIN"
@@ -722,7 +841,6 @@ CENTRAL=${CENTRAL_HOST}
 CENTRAL_PORT=${CENTRAL_PORT}
 EOF
 
-  # ── Servicios systemd ─────────────────────────────────────────────────────
   cat > /etc/systemd/system/blackmux.service << EOF
 [Unit]
 Description=BlackMux server
@@ -798,6 +916,7 @@ do_restart() {
 
 case "${1:-}" in
   install) do_install ;;
+  patch)   do_patch   ;;
   restart) do_restart ;;
-  *) do_install ;;
+  *)       do_install ;;
 esac
