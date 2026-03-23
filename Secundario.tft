@@ -1,35 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-VLESS_UUID="${VLESS_UUID:-11111111-1111-1111-1111-111111111111}"
 CENTRAL_HOST="${CENTRAL_HOST:-central.brawlpass.com.ar}"
 CENTRAL_PORT="${CENTRAL_PORT:-80}"
 VPROXY_BIN="${VPROXY_BIN:-/opt/vproxy/bin/vproxy}"
-
-menu_main() {
-  while true; do
-    echo ""
-    echo "  ╔═══════════════════════════╗"
-    echo "  ║     BlackTunnel Server    ║"
-    echo "  ╠═══════════════════════════╣"
-    echo "  ║  1. Instalar / Actualizar ║"
-    echo "  ║  2. Reiniciar servicios   ║"
-    echo "  ║  0. Salir                 ║"
-    echo "  ╚═══════════════════════════╝"
-    printf "  › "; read -r op
-    case "$op" in
-      1) do_install ;;
-      2) do_restart ;;
-      0) exit 0 ;;
-    esac
-  done
-}
+BLACKMUX_PORT=8443
 
 do_install() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y -q || true
-  apt-get install -y -q -o Dpkg::Options::="--force-confold" gcc curl ca-certificates || \
-  apt-get install -y gcc curl ca-certificates
+  apt-get install -y -q -o Dpkg::Options::="--force-confold" \
+    gcc curl ca-certificates python3 python3-pip || \
+  apt-get install -y gcc curl ca-certificates python3 python3-pip
 
   cat > /etc/sysctl.d/99-bt.conf << 'EOF'
 net.core.rmem_max=134217728
@@ -53,26 +35,301 @@ EOF
   sysctl -p /etc/sysctl.d/99-bt.conf || true
   modprobe tcp_bbr || true
 
-  if [ ! -f /usr/bin/sing-box ] && [ ! -f /usr/local/bin/sing-box ]; then
-    bash <(curl -fsSL https://sing-box.app/install.sh)
-  fi
+  mkdir -p /opt/vproxy/bin /opt/blackmux /var/lib/vproxy
 
-  mkdir -p /etc/sing-box /opt/vproxy/bin /var/lib/vproxy
+  # ── BlackMux server en Python ─────────────────────────────────────────────
+  cat > /opt/blackmux/server.py << 'PYEOF'
+"""
+BlackMux Server — protocolo BlackMuxBridge
 
-  cat > /etc/sing-box/config.json << CFGEOF
-{
-  "log": { "level": "warn" },
-  "inbounds": [{
-    "type": "vless",
-    "listen": "127.0.0.1",
-    "listen_port": 8443,
-    "users": [{"uuid": "${VLESS_UUID}"}],
-    "multiplex": { "enabled": true }
-  }],
-  "outbounds": [{"type": "direct"}]
-}
-CFGEOF
+Header: 7 bytes
+  [0-1] payload_length  (uint16 big-endian)
+  [2-4] stream_id       (uint24 big-endian)
+  [5]   protocol        (0x01=TCP, 0x02=UDP)
+  [6]   command         (0x01=OPEN, 0x02=DATA, 0x03=CLOSE)
 
+CMD_OPEN payload: destino SOCKS5 ATYP+ADDR+PORT
+"""
+import asyncio
+import struct
+import logging
+import socket
+import sys
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s %(levelname)s %(message)s',
+    stream=sys.stderr
+)
+log = logging.getLogger("blackmux")
+
+CMD_OPEN  = 0x01
+CMD_DATA  = 0x02
+CMD_CLOSE = 0x03
+PROTO_TCP = 0x01
+PROTO_UDP = 0x02
+ATYP_IPV4   = 0x01
+ATYP_DOMAIN = 0x03
+ATYP_IPV6   = 0x04
+HEADER_SIZE = 7
+
+def build_frame(stream_id, protocol, command, payload=b''):
+    length = len(payload)
+    header = struct.pack('>H', length)
+    header += bytes([
+        (stream_id >> 16) & 0xFF,
+        (stream_id >> 8)  & 0xFF,
+        stream_id         & 0xFF,
+        protocol,
+        command,
+    ])
+    return header + payload
+
+async def read_frame(reader):
+    header = await reader.readexactly(HEADER_SIZE)
+    payload_len = struct.unpack('>H', header[0:2])[0]
+    stream_id = (header[2] << 16) | (header[3] << 8) | header[4]
+    protocol  = header[5]
+    command   = header[6]
+    payload   = await reader.readexactly(payload_len) if payload_len > 0 else b''
+    return stream_id, protocol, command, payload
+
+def parse_destination(data):
+    if not data:
+        return None, None
+    atyp = data[0]
+    try:
+        if atyp == ATYP_IPV4:
+            host = socket.inet_ntop(socket.AF_INET, data[1:5])
+            port = struct.unpack('>H', data[5:7])[0]
+        elif atyp == ATYP_IPV6:
+            host = socket.inet_ntop(socket.AF_INET6, data[1:17])
+            port = struct.unpack('>H', data[17:19])[0]
+        elif atyp == ATYP_DOMAIN:
+            length = data[1]
+            host = data[2:2 + length].decode('utf-8', errors='replace')
+            port = struct.unpack('>H', data[2 + length:4 + length])[0]
+        else:
+            return None, None
+    except Exception:
+        return None, None
+    return host, port
+
+class TcpStream:
+    def __init__(self, stream_id, host, port, trunk_writer, lock):
+        self.stream_id = stream_id
+        self.host = host
+        self.port = port
+        self.trunk_writer = trunk_writer
+        self.lock = lock
+        self.reader = None
+        self.writer = None
+        self.closed = False
+
+    async def connect(self):
+        self.reader, self.writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port), timeout=10
+        )
+        asyncio.ensure_future(self._read_loop())
+
+    async def _read_loop(self):
+        try:
+            while not self.closed:
+                data = await self.reader.read(16 * 1024)
+                if not data:
+                    break
+                frame = build_frame(self.stream_id, PROTO_TCP, CMD_DATA, data)
+                async with self.lock:
+                    self.trunk_writer.write(frame)
+                    await self.trunk_writer.drain()
+        except Exception as e:
+            log.debug(f"TCP {self.stream_id} read: {e}")
+        finally:
+            await self.close(notify=True)
+
+    async def send_data(self, data):
+        if self.writer and not self.closed:
+            try:
+                self.writer.write(data)
+                await self.writer.drain()
+            except Exception as e:
+                log.debug(f"TCP {self.stream_id} write: {e}")
+                await self.close(notify=True)
+
+    async def close(self, notify=False):
+        if self.closed:
+            return
+        self.closed = True
+        if self.writer:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception:
+                pass
+        if notify:
+            frame = build_frame(self.stream_id, PROTO_TCP, CMD_CLOSE)
+            try:
+                async with self.lock:
+                    self.trunk_writer.write(frame)
+                    await self.trunk_writer.drain()
+            except Exception:
+                pass
+
+class UdpStream:
+    def __init__(self, stream_id, host, port, trunk_writer, lock):
+        self.stream_id = stream_id
+        self.host = host
+        self.port = port
+        self.trunk_writer = trunk_writer
+        self.lock = lock
+        self.transport = None
+        self.closed = False
+
+    async def connect(self):
+        loop = asyncio.get_event_loop()
+        self.transport, _ = await loop.create_datagram_endpoint(
+            lambda: _UdpProto(self),
+            remote_addr=(self.host, self.port)
+        )
+
+    async def send_data(self, data):
+        if self.transport and not self.closed:
+            payload = _strip_udp_header(data)
+            if payload:
+                self.transport.sendto(payload)
+
+    async def on_received(self, data):
+        relay = b'\x00\x00\x00' + data
+        frame = build_frame(self.stream_id, PROTO_UDP, CMD_DATA, relay)
+        try:
+            async with self.lock:
+                self.trunk_writer.write(frame)
+                await self.trunk_writer.drain()
+        except Exception:
+            pass
+
+    async def close(self, notify=False):
+        if self.closed:
+            return
+        self.closed = True
+        if self.transport:
+            self.transport.close()
+        if notify:
+            frame = build_frame(self.stream_id, PROTO_UDP, CMD_CLOSE)
+            try:
+                async with self.lock:
+                    self.trunk_writer.write(frame)
+                    await self.trunk_writer.drain()
+            except Exception:
+                pass
+
+def _strip_udp_header(data):
+    if len(data) < 4:
+        return b''
+    atyp = data[3]
+    if atyp == ATYP_IPV4:
+        offset = 4 + 4 + 2
+    elif atyp == ATYP_IPV6:
+        offset = 4 + 16 + 2
+    elif atyp == ATYP_DOMAIN:
+        if len(data) < 5:
+            return b''
+        offset = 4 + 1 + data[4] + 2
+    else:
+        return b''
+    return data[offset:]
+
+class _UdpProto(asyncio.DatagramProtocol):
+    def __init__(self, stream):
+        self.stream = stream
+    def datagram_received(self, data, addr):
+        asyncio.ensure_future(self.stream.on_received(data))
+    def error_received(self, exc):
+        log.debug(f"UDP {self.stream.stream_id} error: {exc}")
+
+class MuxSession:
+    def __init__(self, reader, writer):
+        self.reader = reader
+        self.writer = writer
+        self.lock = asyncio.Lock()
+        self.streams = {}
+        self.closed = False
+
+    async def run(self):
+        try:
+            while not self.closed:
+                stream_id, protocol, command, payload = await read_frame(self.reader)
+                await self._dispatch(stream_id, protocol, command, payload)
+        except asyncio.IncompleteReadError:
+            pass
+        except Exception as e:
+            log.debug(f"Session error: {e}")
+        finally:
+            await self._close_all()
+
+    async def _dispatch(self, stream_id, protocol, command, payload):
+        if command == CMD_OPEN:
+            await self._handle_open(stream_id, protocol, payload)
+        elif command == CMD_DATA:
+            stream = self.streams.get(stream_id)
+            if stream:
+                await stream.send_data(payload)
+        elif command == CMD_CLOSE:
+            stream = self.streams.pop(stream_id, None)
+            if stream:
+                await stream.close(notify=False)
+
+    async def _handle_open(self, stream_id, protocol, payload):
+        host, port = parse_destination(payload)
+        if not host:
+            frame = build_frame(stream_id, protocol, CMD_CLOSE)
+            async with self.lock:
+                self.writer.write(frame)
+                await self.writer.drain()
+            return
+        try:
+            if protocol == PROTO_TCP:
+                stream = TcpStream(stream_id, host, port, self.writer, self.lock)
+            else:
+                stream = UdpStream(stream_id, host, port, self.writer, self.lock)
+            await stream.connect()
+            self.streams[stream_id] = stream
+        except Exception as e:
+            log.debug(f"OPEN {stream_id} {host}:{port} failed: {e}")
+            frame = build_frame(stream_id, protocol, CMD_CLOSE)
+            async with self.lock:
+                self.writer.write(frame)
+                await self.writer.drain()
+
+    async def _close_all(self):
+        self.closed = True
+        for stream in list(self.streams.values()):
+            await stream.close(notify=False)
+        self.streams.clear()
+        try:
+            self.writer.close()
+            await self.writer.wait_closed()
+        except Exception:
+            pass
+
+async def handle(reader, writer):
+    session = MuxSession(reader, writer)
+    await session.run()
+
+async def main():
+    import os
+    host = '127.0.0.1'
+    port = int(os.environ.get('BLACKMUX_PORT', '8443'))
+    server = await asyncio.start_server(handle, host, port)
+    log.warning(f"BlackMux escuchando en {host}:{port}")
+    async with server:
+        await server.serve_forever()
+
+if __name__ == '__main__':
+    asyncio.run(main())
+PYEOF
+
+  # ── vproxy.c — igual que antes, solo cambia VL_PORT a BLACKMUX_PORT ──────
   cat > /opt/vproxy/vproxy.c << 'CSRC'
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -465,15 +722,17 @@ CENTRAL=${CENTRAL_HOST}
 CENTRAL_PORT=${CENTRAL_PORT}
 EOF
 
-  cat > /etc/systemd/system/sing-box.service << 'EOF'
+  # ── Servicios systemd ─────────────────────────────────────────────────────
+  cat > /etc/systemd/system/blackmux.service << EOF
 [Unit]
-Description=sing-box
+Description=BlackMux server
 After=network.target
 [Service]
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=/usr/bin/python3 /opt/blackmux/server.py
+Environment=BLACKMUX_PORT=${BLACKMUX_PORT}
 Restart=always
-RestartSec=3
-LimitNOFILE=1048576
+RestartSec=2
+LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -481,7 +740,7 @@ EOF
   cat > /etc/systemd/system/vproxy.service << EOF
 [Unit]
 Description=BlackTunnel vproxy
-After=network.target sing-box.service
+After=network.target blackmux.service
 [Service]
 ExecStart=${VPROXY_BIN}
 Restart=always
@@ -511,15 +770,15 @@ EOF
 
   cat > /opt/vproxy/watchdog.sh << 'EOF'
 #!/bin/bash
-for svc in sing-box vproxy; do
+for svc in blackmux vproxy; do
   systemctl is-active --quiet "$svc" || systemctl restart "$svc"
 done
 EOF
   chmod +x /opt/vproxy/watchdog.sh
 
   systemctl daemon-reload
-  systemctl enable sing-box vproxy bt-watchdog.timer
-  systemctl restart sing-box
+  systemctl enable blackmux vproxy bt-watchdog.timer
+  systemctl restart blackmux
   sleep 1
   systemctl restart vproxy
   systemctl restart bt-watchdog.timer
@@ -529,17 +788,16 @@ EOF
   echo "  ════════════════════════════════════"
   echo "  [✓] BlackTunnel instalado"
   echo "      IP      : ${IP}:80"
-  echo "      UUID    : ${VLESS_UUID}"
   echo "      Central : ${CENTRAL_HOST}:${CENTRAL_PORT}"
   echo "  ════════════════════════════════════"
 }
 
 do_restart() {
-  systemctl restart sing-box vproxy
+  systemctl restart blackmux vproxy
 }
 
 case "${1:-}" in
   install) do_install ;;
   restart) do_restart ;;
-  "") menu_main ;;
+  *) do_install ;;
 esac
