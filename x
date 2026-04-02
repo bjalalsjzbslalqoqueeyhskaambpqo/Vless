@@ -47,35 +47,39 @@ chmod +x /usr/local/bin/tunnel-only
 grep -qxF "/usr/local/bin/tunnel-only" /etc/shells || echo "/usr/local/bin/tunnel-only" >> /etc/shells
 
 DROPBEAR_BIN=""
-for p in /usr/sbin/dropbear /usr/bin/dropbear; do
-    [ -x "$p" ] && { DROPBEAR_BIN="$p"; break; }
+for _p in /usr/sbin/dropbear /usr/bin/dropbear; do
+    [ -x "$_p" ] && { DROPBEAR_BIN="$_p"; break; }
 done
-if [ -z "$DROPBEAR_BIN" ]; then
-    error "No se encontró el binario dropbear tras la instalación."
-    exit 1
-fi
-info "Binario dropbear detectado: $DROPBEAR_BIN"
+[ -z "$DROPBEAR_BIN" ] && { error "Binario dropbear no encontrado."; exit 1; }
 
 DROPBEARKEY_BIN=""
-for p in /usr/bin/dropbearkey /usr/sbin/dropbearkey; do
-    [ -x "$p" ] && { DROPBEARKEY_BIN="$p"; break; }
+for _p in /usr/bin/dropbearkey /usr/sbin/dropbearkey; do
+    [ -x "$_p" ] && { DROPBEARKEY_BIN="$_p"; break; }
 done
 
 mkdir -p /etc/dropbear
 if [ -n "$DROPBEARKEY_BIN" ]; then
-    [ -f /etc/dropbear/dropbear_rsa_host_key ]   || "$DROPBEARKEY_BIN" -t rsa    -f /etc/dropbear/dropbear_rsa_host_key   2>/dev/null || true
-    [ -f /etc/dropbear/dropbear_ecdsa_host_key ] || "$DROPBEARKEY_BIN" -t ecdsa  -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null || true
+    [ -f /etc/dropbear/dropbear_rsa_host_key ]    || "$DROPBEARKEY_BIN" -t rsa     -f /etc/dropbear/dropbear_rsa_host_key    2>/dev/null || true
+    [ -f /etc/dropbear/dropbear_ecdsa_host_key ]  || "$DROPBEARKEY_BIN" -t ecdsa   -f /etc/dropbear/dropbear_ecdsa_host_key  2>/dev/null || true
     [ -f /etc/dropbear/dropbear_ed25519_host_key ] || "$DROPBEARKEY_BIN" -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true
 fi
 
-systemctl stop dropbear 2>/dev/null || true
-systemctl disable dropbear 2>/dev/null || true
-rm -f /etc/systemd/system/dropbear.service
+# Deshabilitar el init.d SysV para que no compita con nuestro unit nativo
+if [ -f /etc/init.d/dropbear ]; then
+    systemctl stop dropbear 2>/dev/null || true
+    update-rc.d dropbear disable 2>/dev/null || true
+    # Marcar NO_START para que el init.d no arranque si algo lo invoca
+    sed -i 's/^NO_START=.*/NO_START=1/' /etc/default/dropbear 2>/dev/null || true
+fi
+
+# Borrar override.conf previo si existe (de intentos anteriores)
 rm -rf /etc/systemd/system/dropbear.service.d
 
+# Escribir unit nativo en /etc/systemd/system/ — tiene precedencia absoluta
+# sobre el unit generado por systemd-sysv-generator desde /etc/init.d/
 cat > /etc/systemd/system/dropbear.service << DBSVCEOF
 [Unit]
-Description=Dropbear SSH server (tunnel)
+Description=Dropbear SSH tunnel server
 After=network.target
 StartLimitIntervalSec=30
 StartLimitBurst=10
@@ -93,7 +97,7 @@ DBSVCEOF
 
 systemctl daemon-reload
 systemctl enable dropbear
-info "Dropbear configurado en 127.0.0.1:2222 (unit nativo systemd)"
+info "Dropbear configurado en 127.0.0.1:2222 (unit nativo systemd, SysV deshabilitado)"
 
 info "Instalando badvpn (udpgw) en puerto 7300..."
 BADVPN_INSTALLED=false
