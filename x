@@ -46,36 +46,54 @@ SHEOF
 chmod +x /usr/local/bin/tunnel-only
 grep -qxF "/usr/local/bin/tunnel-only" /etc/shells || echo "/usr/local/bin/tunnel-only" >> /etc/shells
 
-id -u sshtunnel &>/dev/null || useradd -r -s /usr/sbin/nologin -M sshtunnel 2>/dev/null || true
+DROPBEAR_BIN=""
+for p in /usr/sbin/dropbear /usr/bin/dropbear; do
+    [ -x "$p" ] && { DROPBEAR_BIN="$p"; break; }
+done
+if [ -z "$DROPBEAR_BIN" ]; then
+    error "No se encontró el binario dropbear tras la instalación."
+    exit 1
+fi
+info "Binario dropbear detectado: $DROPBEAR_BIN"
+
+DROPBEARKEY_BIN=""
+for p in /usr/bin/dropbearkey /usr/sbin/dropbearkey; do
+    [ -x "$p" ] && { DROPBEARKEY_BIN="$p"; break; }
+done
 
 mkdir -p /etc/dropbear
-dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null || true
-dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null || true
-dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true
+if [ -n "$DROPBEARKEY_BIN" ]; then
+    [ -f /etc/dropbear/dropbear_rsa_host_key ]   || "$DROPBEARKEY_BIN" -t rsa    -f /etc/dropbear/dropbear_rsa_host_key   2>/dev/null || true
+    [ -f /etc/dropbear/dropbear_ecdsa_host_key ] || "$DROPBEARKEY_BIN" -t ecdsa  -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null || true
+    [ -f /etc/dropbear/dropbear_ed25519_host_key ] || "$DROPBEARKEY_BIN" -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true
+fi
 
-cat > /etc/default/dropbear << 'DBEOF'
-NO_START=0
-DROPBEAR_PORT=2222
-DROPBEAR_EXTRA_ARGS="-w -R"
-DBEOF
+systemctl stop dropbear 2>/dev/null || true
+systemctl disable dropbear 2>/dev/null || true
+rm -f /etc/systemd/system/dropbear.service
+rm -rf /etc/systemd/system/dropbear.service.d
 
-mkdir -p /etc/systemd/system/dropbear.service.d
-cat > /etc/systemd/system/dropbear.service.d/override.conf << 'DOVEOF'
+cat > /etc/systemd/system/dropbear.service << DBSVCEOF
 [Unit]
+Description=Dropbear SSH server (tunnel)
+After=network.target
 StartLimitIntervalSec=30
 StartLimitBurst=10
 
 [Service]
-ExecStart=
-ExecStart=/usr/sbin/dropbear -F -E -p 127.0.0.1:2222 -w -R
+ExecStart=${DROPBEAR_BIN} -F -E -p 127.0.0.1:2222 -w -s -g
 Restart=always
-RestartSec=1
-TimeoutStartSec=5
-DOVEOF
+RestartSec=2
+TimeoutStartSec=10
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+DBSVCEOF
 
 systemctl daemon-reload
-systemctl enable dropbear 2>/dev/null || true
-info "Dropbear configurado en 127.0.0.1:2222 (restart agresivo activo)"
+systemctl enable dropbear
+info "Dropbear configurado en 127.0.0.1:2222 (unit nativo systemd)"
 
 info "Instalando badvpn (udpgw) en puerto 7300..."
 BADVPN_INSTALLED=false
@@ -847,7 +865,7 @@ echo ""
 echo "  URL PANEL:  http://${SERVER_IP}:${PANEL_PORT}"
 echo "  TOKEN:      ${PANEL_TOKEN}"
 echo "  BBR: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'no disponible')"
-echo "  BADVPN UDP: $([ '$BADVPN_INSTALLED' = true ] && echo '127.0.0.1:7300' || echo 'no instalado')"
+echo "  BADVPN UDP: $([ "$BADVPN_INSTALLED" = true ] && echo '127.0.0.1:7300' || echo 'no instalado')"
 echo ""
 echo "  Flujo:  cliente:80 → btserver.py"
 echo "            action:ssh    → dropbear 127.0.0.1:2222"
