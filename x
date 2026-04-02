@@ -10,7 +10,7 @@ if [ "$(id -u)" -ne 0 ]; then error "Ejecutar como root."; exit 1; fi
 
 info "Actualizando paquetes..."
 apt-get update -qq
-apt-get install -y -qq curl wget python3 python3-pip ca-certificates iproute2 unzip systemd
+apt-get install -y -qq curl wget python3 python3-pip ca-certificates iproute2 unzip systemd cmake make gcc g++ libssl-dev
 
 FRESH_INSTALL=true
 if [ -f /opt/btserver/token.txt ] && systemctl is-active --quiet btserver 2>/dev/null; then
@@ -38,22 +38,6 @@ SERVER_IP=$(ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1
 info "Instalando dropbear..."
 apt-get install -y dropbear
 
-if ! command -v badvpn-tun2socks &>/dev/null; then
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64)  BADVPN_URL="https://github.com/ambrop72/badvpn/releases/download/1.999.130/badvpn-1.999.130-x86_64-linux.tar.gz" ;;
-        aarch64) BADVPN_URL="https://github.com/ambrop72/badvpn/releases/download/1.999.130/badvpn-1.999.130-aarch64-linux.tar.gz" ;;
-        *) warn "badvpn no disponible para $ARCH — omitiendo" ;;
-    esac
-    if [ -n "${BADVPN_URL:-}" ]; then
-        cd /tmp
-        wget -q "$BADVPN_URL" -O badvpn.tar.gz && tar -xzf badvpn.tar.gz && cp badvpn*/badvpn-tun2socks /usr/local/bin/ 2>/dev/null || true
-        chmod +x /usr/local/bin/badvpn-tun2socks 2>/dev/null || true
-        cd - > /dev/null
-        command -v badvpn-tun2socks &>/dev/null && info "badvpn instalado" || warn "badvpn no se pudo instalar"
-    fi
-fi
-
 cat > /usr/local/bin/tunnel-only << 'SHEOF'
 #!/bin/bash
 echo "Tunneling only. No shell access."
@@ -77,14 +61,67 @@ DBEOF
 
 mkdir -p /etc/systemd/system/dropbear.service.d
 cat > /etc/systemd/system/dropbear.service.d/override.conf << 'DOVEOF'
+[Unit]
+StartLimitIntervalSec=30
+StartLimitBurst=10
+
 [Service]
 ExecStart=
 ExecStart=/usr/sbin/dropbear -F -E -p 127.0.0.1:2222 -w -R
+Restart=always
+RestartSec=1
+TimeoutStartSec=5
 DOVEOF
 
 systemctl daemon-reload
 systemctl enable dropbear 2>/dev/null || true
-info "Dropbear configurado en 127.0.0.1:2222"
+info "Dropbear configurado en 127.0.0.1:2222 (restart agresivo activo)"
+
+info "Instalando badvpn (udpgw) en puerto 7300..."
+BADVPN_INSTALLED=false
+if command -v badvpn-udpgw &>/dev/null; then
+    info "badvpn-udpgw ya presente."
+    BADVPN_INSTALLED=true
+else
+    cd /tmp
+    rm -rf badvpn-src
+    git clone --depth=1 https://github.com/ambrop72/badvpn.git badvpn-src 2>/dev/null && {
+        mkdir -p badvpn-src/build
+        cd badvpn-src/build
+        cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 -DCMAKE_BUILD_TYPE=Release 2>/dev/null
+        make -j"$(nproc)" 2>/dev/null
+        if [ -f udpgw/badvpn-udpgw ]; then
+            cp udpgw/badvpn-udpgw /usr/local/bin/
+            chmod +x /usr/local/bin/badvpn-udpgw
+            BADVPN_INSTALLED=true
+            info "badvpn-udpgw compilado e instalado."
+        fi
+        cd /tmp
+    } || true
+    if [ "$BADVPN_INSTALLED" = false ]; then
+        warn "No se pudo compilar badvpn — omitiendo."
+    fi
+fi
+
+if [ "$BADVPN_INSTALLED" = true ]; then
+    cat > /etc/systemd/system/badvpn-udpgw.service << 'BADVEOF'
+[Unit]
+Description=BadVPN UDP Gateway
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500 --max-connections-for-client 10
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+BADVEOF
+    systemctl daemon-reload
+    systemctl enable badvpn-udpgw 2>/dev/null || true
+    info "badvpn-udpgw configurado en 127.0.0.1:7300"
+fi
 
 info "Instalando/actualizando Xray..."
 if bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
@@ -188,6 +225,29 @@ XRAY_PORT  = 10809
 SSH_HOST   = "127.0.0.1"
 SSH_PORT   = 2222
 
+_dropbear_ok = True
+
+def dropbear_healthcheck():
+    global _dropbear_ok
+    import socket, subprocess
+    while True:
+        try:
+            s = socket.create_connection((SSH_HOST, SSH_PORT), timeout=2)
+            s.close()
+            if not _dropbear_ok:
+                print("[healthcheck] dropbear recuperado", flush=True)
+            _dropbear_ok = True
+        except Exception:
+            if _dropbear_ok:
+                print("[healthcheck] dropbear NO responde — restart", flush=True)
+            _dropbear_ok = False
+            try:
+                subprocess.run(["systemctl", "restart", "dropbear"], timeout=5, capture_output=True)
+            except Exception:
+                pass
+        time.sleep(5)
+
+
 def load_db():
     global DB_CACHE, DB_MTIME
     if not DB_PATH.exists():
@@ -245,6 +305,7 @@ async def pipe(src_r, dst_w):
         pass
     try:
         dst_w.close()
+        await dst_w.wait_closed()
     except:
         pass
 
@@ -359,25 +420,59 @@ async def handle(reader, writer):
             pass
 
     if action == "ssh":
+        if not client_id:
+            await reject("INVALID")
+            return
+        state, days_left, name, expires_at = ensure_client(client_id)
+        if state != "VALID":
+            await reject(state, days_left)
+            return
+        if not _dropbear_ok:
+            try:
+                writer.write(
+                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
+                    b"X-Status: SSH_DOWN\r\n\r\n"
+                )
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+            except:
+                pass
+            return
+        ssh_r = ssh_w = None
         try:
+            ssh_r, ssh_w = await asyncio.wait_for(
+                asyncio.open_connection(SSH_HOST, SSH_PORT), timeout=3
+            )
             writer.write(
                 b"HTTP/1.1 101 Switching Protocols\r\n"
                 b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
                 b"X-Status: VALID\r\nX-Auth-State: VALID\r\n\r\n"
             )
             await writer.drain()
-            ssh_r, ssh_w = await asyncio.open_connection(SSH_HOST, SSH_PORT)
             await asyncio.gather(
                 pipe(reader, ssh_w),
                 pipe(ssh_r, writer)
             )
-        except:
-            pass
-        finally:
+        except asyncio.TimeoutError:
             try:
-                writer.close()
+                writer.write(
+                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
+                    b"X-Status: SSH_TIMEOUT\r\n\r\n"
+                )
+                await writer.drain()
             except:
                 pass
+        except Exception:
+            pass
+        finally:
+            for obj in (ssh_w, writer):
+                if obj is not None:
+                    try:
+                        obj.close()
+                        await obj.wait_closed()
+                    except:
+                        pass
         return
 
     if not client_id:
@@ -426,6 +521,7 @@ async def handle(reader, writer):
 
 async def main():
     threading.Thread(target=expiry_checker, daemon=True).start()
+    threading.Thread(target=dropbear_healthcheck, daemon=True).start()
     srv = await asyncio.start_server(handle, "0.0.0.0", 80, limit=65536, backlog=512)
     print("btserver escuchando :80  →  xray:10809 / dropbear:2222")
     async with srv:
@@ -729,10 +825,13 @@ WantedBy=multi-user.target
 SVCEOF
 
 systemctl daemon-reload
-systemctl enable xray btserver btpanel dropbear
+
+ENABLE_SVCS="xray btserver btpanel dropbear"
+[ "$BADVPN_INSTALLED" = true ] && ENABLE_SVCS="$ENABLE_SVCS badvpn-udpgw"
+systemctl enable $ENABLE_SVCS
 
 info "Iniciando servicios..."
-for svc in xray dropbear btserver btpanel; do
+for svc in xray dropbear $( [ "$BADVPN_INSTALLED" = true ] && echo badvpn-udpgw ) btserver btpanel; do
     if systemctl restart "$svc" 2>/dev/null; then
         info "  ✓ $svc OK"
     else
@@ -748,8 +847,10 @@ echo ""
 echo "  URL PANEL:  http://${SERVER_IP}:${PANEL_PORT}"
 echo "  TOKEN:      ${PANEL_TOKEN}"
 echo "  BBR: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'no disponible')"
+echo "  BADVPN UDP: $([ '$BADVPN_INSTALLED' = true ] && echo '127.0.0.1:7300' || echo 'no instalado')"
 echo ""
 echo "  Flujo:  cliente:80 → btserver.py"
 echo "            action:ssh    → dropbear 127.0.0.1:2222"
 echo "            action:tunnel → xray     127.0.0.1:10809"
+echo "            udp/icmp      → badvpn   127.0.0.1:7300"
 echo "================================================"
