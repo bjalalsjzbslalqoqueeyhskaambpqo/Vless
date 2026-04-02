@@ -290,9 +290,11 @@ async def handle(reader, writer):
 
     action = client_id = ""
     for line in raw.decode(errors="replace").splitlines():
-        lower = line.lower()
-        if lower.startswith("action:"): action = line.split(":",1)[1].strip().lower()
-        if lower.startswith("x-client-id:"): client_id = line.split(":",1)[1].strip()
+        lower = line.lower().strip()
+        if lower.startswith("action:") or lower.startswith("action :"):
+            action = line.split(":",1)[1].strip().lower()
+        if lower.startswith("x-client-id:"):
+            client_id = line.split(":",1)[1].strip()
 
     async def reject(state, days=0):
         try:
@@ -301,6 +303,33 @@ async def handle(reader, writer):
             writer.close()
             await writer.wait_closed()
         except: pass
+
+    # SSH no requiere client ID — dropbear autentica por usuario/contraseña
+    if action == "ssh":
+        response = (
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"X-Status: VALID\r\nX-Auth-State: VALID\r\n\r\n"
+        )
+        try:
+            writer.write(response)
+            await writer.drain()
+            ssh_r, ssh_w = await asyncio.open_connection("127.0.0.1", 2222)
+            async def pipe(src_r, dst_w):
+                try:
+                    while True:
+                        d = await src_r.read(65536)
+                        if not d: break
+                        dst_w.write(d)
+                        await dst_w.drain()
+                except: pass
+                try: dst_w.close()
+                except: pass
+            await asyncio.gather(pipe(reader, ssh_w), pipe(ssh_r, writer))
+        except: pass
+        finally:
+            try: writer.close()
+            except: pass
+        return
 
     if not client_id:
         await reject("INVALID")
@@ -330,27 +359,6 @@ async def handle(reader, writer):
         finally:
             if ACTIVE_SESSIONS.get(client_id) is writer:
                 ACTIVE_SESSIONS.pop(client_id, None)
-    elif action == "ssh":
-        writer.write(response)
-        await writer.drain()
-        try:
-            ssh_r, ssh_w = await asyncio.open_connection("127.0.0.1", 2222)
-            async def pipe(src_r, dst_w):
-                try:
-                    while True:
-                        d = await src_r.read(65536)
-                        if not d: break
-                        dst_w.write(d)
-                        await dst_w.drain()
-                except: pass
-                try: dst_w.close()
-                except: pass
-            await asyncio.gather(pipe(reader, ssh_w), pipe(ssh_r, writer))
-        except Exception as e:
-            pass
-        finally:
-            try: writer.close()
-            except: pass
     elif action == "auth":
         writer.write(response)
         await writer.drain()
