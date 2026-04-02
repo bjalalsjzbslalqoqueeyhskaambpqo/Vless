@@ -237,38 +237,15 @@ TYPE_OPEN  = 0x01
 TYPE_DATA  = 0x02
 TYPE_CLOSE = 0x03
 
-DB_PATH    = Path("/opt/btserver/clients.json")
-DB_CACHE   = {}
-DB_MTIME   = 0.0
+DB_PATH         = Path("/opt/btserver/clients.json")
+DB_CACHE        = {}
+DB_MTIME        = 0.0
 ACTIVE_SESSIONS = {}
 
-XRAY_HOST  = "127.0.0.1"
-XRAY_PORT  = 10809
-SSH_HOST   = "127.0.0.1"
-SSH_PORT   = 2222
-
-_dropbear_ok = True
-
-def dropbear_healthcheck():
-    global _dropbear_ok
-    import socket, subprocess
-    while True:
-        try:
-            s = socket.create_connection((SSH_HOST, SSH_PORT), timeout=2)
-            s.close()
-            if not _dropbear_ok:
-                print("[healthcheck] dropbear recuperado", flush=True)
-            _dropbear_ok = True
-        except Exception:
-            if _dropbear_ok:
-                print("[healthcheck] dropbear NO responde — restart", flush=True)
-            _dropbear_ok = False
-            try:
-                subprocess.run(["systemctl", "restart", "dropbear"], timeout=5, capture_output=True)
-            except Exception:
-                pass
-        time.sleep(5)
-
+XRAY_HOST = "127.0.0.1"
+XRAY_PORT = 10809
+SSH_HOST  = "127.0.0.1"
+SSH_PORT  = 2222
 
 def load_db():
     global DB_CACHE, DB_MTIME
@@ -395,14 +372,10 @@ async def handle_mux(reader, writer):
         pass
     finally:
         for _, (_, xw) in list(streams.items()):
-            try:
-                xw.close()
-            except:
-                pass
-        try:
-            writer.close()
-        except:
-            pass
+            try: xw.close()
+            except: pass
+        try: writer.close()
+        except: pass
 
 async def handle(reader, writer):
     writer.transport.set_write_buffer_limits(high=65536, low=16384)
@@ -449,23 +422,9 @@ async def handle(reader, writer):
         if state != "VALID":
             await reject(state, days_left)
             return
-        if not _dropbear_ok:
-            try:
-                writer.write(
-                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
-                    b"X-Status: SSH_DOWN\r\n\r\n"
-                )
-                await writer.drain()
-                writer.close()
-                await writer.wait_closed()
-            except:
-                pass
-            return
         ssh_r = ssh_w = None
         try:
-            ssh_r, ssh_w = await asyncio.wait_for(
-                asyncio.open_connection(SSH_HOST, SSH_PORT), timeout=3
-            )
+            ssh_r, ssh_w = await asyncio.open_connection(SSH_HOST, SSH_PORT)
             writer.write(
                 b"HTTP/1.1 101 Switching Protocols\r\n"
                 b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -476,15 +435,6 @@ async def handle(reader, writer):
                 pipe(reader, ssh_w),
                 pipe(ssh_r, writer)
             )
-        except asyncio.TimeoutError:
-            try:
-                writer.write(
-                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
-                    b"X-Status: SSH_TIMEOUT\r\n\r\n"
-                )
-                await writer.drain()
-            except:
-                pass
         except Exception:
             pass
         finally:
@@ -518,10 +468,8 @@ async def handle(reader, writer):
         prev = ACTIVE_SESSIONS.get(client_id)
         ACTIVE_SESSIONS[client_id] = writer
         if prev is not None:
-            try:
-                prev.close()
-            except:
-                pass
+            try: prev.close()
+            except: pass
         try:
             await handle_mux(reader, writer)
         finally:
@@ -536,14 +484,11 @@ async def handle(reader, writer):
         except:
             pass
     else:
-        try:
-            writer.close()
-        except:
-            pass
+        try: writer.close()
+        except: pass
 
 async def main():
     threading.Thread(target=expiry_checker, daemon=True).start()
-    threading.Thread(target=dropbear_healthcheck, daemon=True).start()
     srv = await asyncio.start_server(handle, "0.0.0.0", 80, limit=65536, backlog=512)
     print("btserver escuchando :80  →  xray:10809 / dropbear:2222")
     async with srv:
