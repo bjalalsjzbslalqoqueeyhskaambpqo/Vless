@@ -36,7 +36,23 @@ PANEL_PORT=8090
 SERVER_IP=$(ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1 | head -1 || echo "0.0.0.0")
 
 info "Instalando dropbear (SSH tunneling)..."
-apt-get install -y -qq dropbear badvpn
+apt-get install -y dropbear
+# badvpn no está en repos de Debian 11 — descargar binario
+if ! command -v badvpn-tun2socks &>/dev/null; then
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  BADVPN_URL="https://github.com/ambrop72/badvpn/releases/download/1.999.130/badvpn-1.999.130-x86_64-linux.tar.gz" ;;
+        aarch64) BADVPN_URL="https://github.com/ambrop72/badvpn/releases/download/1.999.130/badvpn-1.999.130-aarch64-linux.tar.gz" ;;
+        *) warn "badvpn no disponible para $ARCH — omitiendo" ;;
+    esac
+    if [ -n "${BADVPN_URL:-}" ]; then
+        cd /tmp
+        wget -q "$BADVPN_URL" -O badvpn.tar.gz &&         tar -xzf badvpn.tar.gz &&         cp badvpn*/badvpn-tun2socks /usr/local/bin/ 2>/dev/null || true
+        chmod +x /usr/local/bin/badvpn-tun2socks 2>/dev/null || true
+        cd - > /dev/null
+        command -v badvpn-tun2socks &>/dev/null && info "badvpn instalado" || warn "badvpn no se pudo instalar"
+    fi
+fi
 
 # Crear usuario base para tunneling sin shell
 id -u sshtunnel &>/dev/null || useradd -r -s /usr/sbin/nologin -M sshtunnel 2>/dev/null || true
