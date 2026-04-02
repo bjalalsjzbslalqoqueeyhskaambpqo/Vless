@@ -35,9 +35,9 @@ fi
 PANEL_PORT=8090
 SERVER_IP=$(ip -4 addr show scope global | awk '/inet /{print $2}' | cut -d/ -f1 | head -1 || echo "0.0.0.0")
 
-info "Instalando dropbear (SSH tunneling)..."
+info "Instalando dropbear..."
 apt-get install -y dropbear
-# badvpn no está en repos de Debian 11 — descargar binario
+
 if ! command -v badvpn-tun2socks &>/dev/null; then
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -47,33 +47,44 @@ if ! command -v badvpn-tun2socks &>/dev/null; then
     esac
     if [ -n "${BADVPN_URL:-}" ]; then
         cd /tmp
-        wget -q "$BADVPN_URL" -O badvpn.tar.gz &&         tar -xzf badvpn.tar.gz &&         cp badvpn*/badvpn-tun2socks /usr/local/bin/ 2>/dev/null || true
+        wget -q "$BADVPN_URL" -O badvpn.tar.gz && tar -xzf badvpn.tar.gz && cp badvpn*/badvpn-tun2socks /usr/local/bin/ 2>/dev/null || true
         chmod +x /usr/local/bin/badvpn-tun2socks 2>/dev/null || true
         cd - > /dev/null
         command -v badvpn-tun2socks &>/dev/null && info "badvpn instalado" || warn "badvpn no se pudo instalar"
     fi
 fi
 
-# Crear usuario base para tunneling sin shell
-id -u sshtunnel &>/dev/null || useradd -r -s /usr/sbin/nologin -M sshtunnel 2>/dev/null || true
-
-# Configurar dropbear solo para tunneling en loopback
-cat > /etc/default/dropbear << 'DBEOF'
-NO_START=0
-DROPBEAR_PORT=2222
-DROPBEAR_EXTRA_ARGS="-p 127.0.0.1:2222"
-DBEOF
-
-# Shell restringida para usuarios de tunneling
 cat > /usr/local/bin/tunnel-only << 'SHEOF'
 #!/bin/bash
 echo "Tunneling only. No shell access."
 sleep 86400
 SHEOF
 chmod +x /usr/local/bin/tunnel-only
+grep -qxF "/usr/local/bin/tunnel-only" /etc/shells || echo "/usr/local/bin/tunnel-only" >> /etc/shells
 
+id -u sshtunnel &>/dev/null || useradd -r -s /usr/sbin/nologin -M sshtunnel 2>/dev/null || true
+
+mkdir -p /etc/dropbear
+dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null || true
+dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null || true
+dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true
+
+cat > /etc/default/dropbear << 'DBEOF'
+NO_START=0
+DROPBEAR_PORT=2222
+DROPBEAR_EXTRA_ARGS="-w -R"
+DBEOF
+
+mkdir -p /etc/systemd/system/dropbear.service.d
+cat > /etc/systemd/system/dropbear.service.d/override.conf << 'DOVEOF'
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/dropbear -F -E -p 127.0.0.1:2222 -w -R
+DOVEOF
+
+systemctl daemon-reload
 systemctl enable dropbear 2>/dev/null || true
-info "Dropbear instalado en 127.0.0.1:2222"
+info "Dropbear configurado en 127.0.0.1:2222"
 
 info "Instalando/actualizando Xray..."
 if bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
@@ -167,10 +178,15 @@ TYPE_OPEN  = 0x01
 TYPE_DATA  = 0x02
 TYPE_CLOSE = 0x03
 
-DB_PATH = Path("/opt/btserver/clients.json")
-DB_CACHE = {}
-DB_MTIME = 0.0
+DB_PATH    = Path("/opt/btserver/clients.json")
+DB_CACHE   = {}
+DB_MTIME   = 0.0
 ACTIVE_SESSIONS = {}
+
+XRAY_HOST  = "127.0.0.1"
+XRAY_PORT  = 10809
+SSH_HOST   = "127.0.0.1"
+SSH_PORT   = 2222
 
 def load_db():
     global DB_CACHE, DB_MTIME
@@ -217,6 +233,21 @@ def expiry_checker():
                 except: pass
         time.sleep(1)
 
+async def pipe(src_r, dst_w):
+    try:
+        while True:
+            d = await src_r.read(65536)
+            if not d:
+                break
+            dst_w.write(d)
+            await dst_w.drain()
+    except:
+        pass
+    try:
+        dst_w.close()
+    except:
+        pass
+
 async def handle_mux(reader, writer):
     streams = {}
     write_lock = asyncio.Lock()
@@ -231,9 +262,11 @@ async def handle_mux(reader, writer):
         try:
             while True:
                 d = await xr.read(65536)
-                if not d: break
+                if not d:
+                    break
                 await send_frame(TYPE_DATA, sid, d)
-        except: pass
+        except:
+            pass
         await send_frame(TYPE_CLOSE, sid)
         streams.pop(sid, None)
 
@@ -241,7 +274,8 @@ async def handle_mux(reader, writer):
         nonlocal buf
         while len(buf) < n:
             chunk = await reader.read(65536)
-            if not chunk: raise ConnectionError()
+            if not chunk:
+                raise ConnectionError()
             buf.extend(chunk)
         d, buf[:] = bytes(buf[:n]), buf[n:]
         return d
@@ -252,7 +286,7 @@ async def handle_mux(reader, writer):
             data = await read_n(l) if l else b""
             if t == TYPE_OPEN:
                 try:
-                    xr, xw = await asyncio.open_connection("127.0.0.1", 10809)
+                    xr, xw = await asyncio.open_connection(XRAY_HOST, XRAY_PORT)
                     streams[sid] = (xr, xw)
                     asyncio.get_event_loop().create_task(xray_to_client(sid, xr))
                 except:
@@ -260,20 +294,32 @@ async def handle_mux(reader, writer):
             elif t == TYPE_DATA:
                 pair = streams.get(sid)
                 if pair:
-                    try: pair[1].write(data); await pair[1].drain()
-                    except: await send_frame(TYPE_CLOSE, sid); streams.pop(sid, None)
+                    try:
+                        pair[1].write(data)
+                        await pair[1].drain()
+                    except:
+                        await send_frame(TYPE_CLOSE, sid)
+                        streams.pop(sid, None)
             elif t == TYPE_CLOSE:
                 pair = streams.pop(sid, None)
                 if pair:
-                    try: pair[1].close(); await pair[1].wait_closed()
-                    except: pass
-    except: pass
+                    try:
+                        pair[1].close()
+                        await pair[1].wait_closed()
+                    except:
+                        pass
+    except:
+        pass
     finally:
         for _, (_, xw) in list(streams.items()):
-            try: xw.close()
-            except: pass
-        try: writer.close()
-        except: pass
+            try:
+                xw.close()
+            except:
+                pass
+        try:
+            writer.close()
+        except:
+            pass
 
 async def handle(reader, writer):
     writer.transport.set_write_buffer_limits(high=65536, low=16384)
@@ -282,53 +328,56 @@ async def handle(reader, writer):
     while time.monotonic() - start < 5:
         try:
             chunk = await asyncio.wait_for(reader.read(4096), timeout=1)
-            if not chunk: break
+            if not chunk:
+                break
             raw += chunk
-            if b"\r\n\r\n" in raw: break
+            if b"\r\n\r\n" in raw:
+                break
         except asyncio.TimeoutError:
             break
 
-    action = client_id = ""
+    action = ""
+    client_id = ""
     for line in raw.decode(errors="replace").splitlines():
         lower = line.lower().strip()
         if lower.startswith("action:") or lower.startswith("action :"):
-            action = line.split(":",1)[1].strip().lower()
+            action = line.split(":", 1)[1].strip().lower()
         if lower.startswith("x-client-id:"):
-            client_id = line.split(":",1)[1].strip()
+            client_id = line.split(":", 1)[1].strip()
 
     async def reject(state, days=0):
         try:
-            writer.write(f"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nX-Status: {state}\r\nX-Auth-State: {state}\r\nX-Days-Left: {days}\r\n\r\n".encode())
+            writer.write(
+                f"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n"
+                f"X-Status: {state}\r\nX-Auth-State: {state}\r\nX-Days-Left: {days}\r\n\r\n"
+                .encode()
+            )
             await writer.drain()
             writer.close()
             await writer.wait_closed()
-        except: pass
+        except:
+            pass
 
-    # SSH no requiere client ID — dropbear autentica por usuario/contraseña
     if action == "ssh":
-        response = (
-            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-            b"X-Status: VALID\r\nX-Auth-State: VALID\r\n\r\n"
-        )
         try:
-            writer.write(response)
+            writer.write(
+                b"HTTP/1.1 101 Switching Protocols\r\n"
+                b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                b"X-Status: VALID\r\nX-Auth-State: VALID\r\n\r\n"
+            )
             await writer.drain()
-            ssh_r, ssh_w = await asyncio.open_connection("127.0.0.1", 2222)
-            async def pipe(src_r, dst_w):
-                try:
-                    while True:
-                        d = await src_r.read(65536)
-                        if not d: break
-                        dst_w.write(d)
-                        await dst_w.drain()
-                except: pass
-                try: dst_w.close()
-                except: pass
-            await asyncio.gather(pipe(reader, ssh_w), pipe(ssh_r, writer))
-        except: pass
+            ssh_r, ssh_w = await asyncio.open_connection(SSH_HOST, SSH_PORT)
+            await asyncio.gather(
+                pipe(reader, ssh_w),
+                pipe(ssh_r, writer)
+            )
+        except:
+            pass
         finally:
-            try: writer.close()
-            except: pass
+            try:
+                writer.close()
+            except:
+                pass
         return
 
     if not client_id:
@@ -352,8 +401,10 @@ async def handle(reader, writer):
         prev = ACTIVE_SESSIONS.get(client_id)
         ACTIVE_SESSIONS[client_id] = writer
         if prev is not None:
-            try: prev.close()
-            except: pass
+            try:
+                prev.close()
+            except:
+                pass
         try:
             await handle_mux(reader, writer)
         finally:
@@ -362,16 +413,21 @@ async def handle(reader, writer):
     elif action == "auth":
         writer.write(response)
         await writer.drain()
-        try: writer.close(); await writer.wait_closed()
-        except: pass
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except:
+            pass
     else:
-        try: writer.close()
-        except: pass
+        try:
+            writer.close()
+        except:
+            pass
 
 async def main():
     threading.Thread(target=expiry_checker, daemon=True).start()
     srv = await asyncio.start_server(handle, "0.0.0.0", 80, limit=65536, backlog=512)
-    print(f"escuchando :80")
+    print("btserver escuchando :80  →  xray:10809 / dropbear:2222")
     async with srv:
         await srv.serve_forever()
 
@@ -384,14 +440,17 @@ info "Escribiendo panel.py..."
 cat > /opt/btserver/panel.py << PYEOF
 #!/usr/bin/env python3
 import json
+import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-DB_PATH = Path("/opt/btserver/clients.json")
-TOKEN_PATH = Path("/opt/btserver/token.txt")
-PORT = ${PANEL_PORT}
+DB_PATH      = Path("/opt/btserver/clients.json")
+SSH_DB_PATH  = Path("/opt/btserver/ssh_users.json")
+TOKEN_PATH   = Path("/opt/btserver/token.txt")
+PORT         = ${PANEL_PORT}
+TUNNEL_SHELL = "/usr/local/bin/tunnel-only"
 
 def load_token():
     return TOKEN_PATH.read_text().strip()
@@ -407,6 +466,17 @@ def load_db():
 def save_db(db):
     DB_PATH.write_text(json.dumps(db, indent=2, sort_keys=True))
 
+def load_ssh_db():
+    if not SSH_DB_PATH.exists():
+        SSH_DB_PATH.write_text("{}")
+    try:
+        return json.loads(SSH_DB_PATH.read_text())
+    except:
+        return {}
+
+def save_ssh_db(db):
+    SSH_DB_PATH.write_text(json.dumps(db, indent=2, sort_keys=True))
+
 def now_ts():
     return int(time.time())
 
@@ -421,19 +491,18 @@ def json_resp(handler, code, data):
     handler.end_headers()
     handler.wfile.write(body)
 
-
-SSH_DB_PATH = Path("/opt/btserver/ssh_users.json")
-
-def load_ssh_db():
-    if not SSH_DB_PATH.exists():
-        SSH_DB_PATH.write_text("{}")
+def ensure_tunnel_shell():
+    p = Path(TUNNEL_SHELL)
+    if not p.exists():
+        p.write_text("#!/bin/bash\necho 'Tunneling only. No shell access.'\nsleep 86400\n")
+        p.chmod(0o755)
     try:
-        return json.loads(SSH_DB_PATH.read_text())
+        shells = Path("/etc/shells").read_text()
     except:
-        return {}
-
-def save_ssh_db(db):
-    SSH_DB_PATH.write_text(json.dumps(db, indent=2, sort_keys=True))
+        shells = ""
+    if TUNNEL_SHELL not in shells:
+        with open("/etc/shells", "a") as f:
+            f.write(TUNNEL_SHELL + "\n")
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
@@ -443,14 +512,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_body(self):
         length = int(self.headers.get("Content-Length", "0"))
-        if length == 0: return {}
-        try: return json.loads(self.rfile.read(length).decode())
-        except: return {}
+        if length == 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode())
+        except:
+            return {}
 
     def do_GET(self):
-        if not self.auth(): json_resp(self, 401, {"error": "unauthorized"}); return
+        if not self.auth():
+            json_resp(self, 401, {"error": "unauthorized"}); return
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
+        path   = parsed.path.rstrip("/")
         params = parse_qs(parsed.query)
 
         if path == "/clients":
@@ -460,19 +533,19 @@ class Handler(BaseHTTPRequestHandler):
                 exp = int(data.get("expires_at", 0))
                 result.append({"id": cid, "name": data.get("name", "sin-nombre"),
                     "expires_at": exp, "days_left": days_left(exp), "active": now_ts() <= exp})
-            json_resp(self, 200, {"clients": result, "total": len(result)})
-            return
+            json_resp(self, 200, {"clients": result, "total": len(result)}); return
 
         if path == "/client":
             cid = params.get("id", [""])[0].strip()
-            if not cid: json_resp(self, 400, {"error": "falta id"}); return
-            db = load_db()
+            if not cid:
+                json_resp(self, 400, {"error": "falta id"}); return
+            db   = load_db()
             item = db.get(cid)
-            if not item: json_resp(self, 404, {"error": "no encontrado"}); return
+            if not item:
+                json_resp(self, 404, {"error": "no encontrado"}); return
             exp = int(item.get("expires_at", 0))
             json_resp(self, 200, {"id": cid, "name": item.get("name", "sin-nombre"),
-                "expires_at": exp, "days_left": days_left(exp), "active": now_ts() <= exp})
-            return
+                "expires_at": exp, "days_left": days_left(exp), "active": now_ts() <= exp}); return
 
         if path == "/ssh/users":
             db = load_ssh_db()
@@ -481,51 +554,58 @@ class Handler(BaseHTTPRequestHandler):
                 exp = int(data.get("expires_at", 0))
                 result.append({"user": user, "name": data.get("name", user),
                     "expires_at": exp, "days_left": days_left(exp), "active": now_ts() <= exp})
-            json_resp(self, 200, {"users": result, "total": len(result)})
-            return
+            json_resp(self, 200, {"users": result, "total": len(result)}); return
 
         json_resp(self, 404, {"error": "ruta no encontrada"})
 
     def do_POST(self):
-        if not self.auth(): json_resp(self, 401, {"error": "unauthorized"}); return
+        if not self.auth():
+            json_resp(self, 401, {"error": "unauthorized"}); return
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        body = self.read_body()
+        path   = parsed.path.rstrip("/")
+        body   = self.read_body()
 
         if path == "/client/create":
-            cid = str(body.get("id", "")).strip()
+            cid  = str(body.get("id", "")).strip()
             name = str(body.get("name", "sin-nombre")).strip() or "sin-nombre"
             days = int(body.get("days", 30))
-            if not cid: json_resp(self, 400, {"error": "falta id"}); return
-            db = load_db()
+            if not cid:
+                json_resp(self, 400, {"error": "falta id"}); return
+            db  = load_db()
             now = now_ts()
             db[cid] = {"name": name, "created_at": db.get(cid, {}).get("created_at", now),
                 "expires_at": now + max(days, 0) * 86400}
             save_db(db)
-            json_resp(self, 200, {"ok": True, "id": cid, "name": name, "days": days})
-            return
+            json_resp(self, 200, {"ok": True, "id": cid, "name": name, "days": days}); return
 
         if path == "/client/delete":
             cid = str(body.get("id", "")).strip()
-            if not cid: json_resp(self, 400, {"error": "falta id"}); return
+            if not cid:
+                json_resp(self, 400, {"error": "falta id"}); return
             db = load_db()
-            if cid not in db: json_resp(self, 404, {"error": "no encontrado"}); return
+            if cid not in db:
+                json_resp(self, 404, {"error": "no encontrado"}); return
             db.pop(cid); save_db(db)
-            json_resp(self, 200, {"ok": True})
-            return
+            json_resp(self, 200, {"ok": True}); return
 
         if path == "/client/update":
             cid = str(body.get("id", "")).strip()
-            if not cid: json_resp(self, 400, {"error": "falta id"}); return
-            db = load_db()
+            if not cid:
+                json_resp(self, 400, {"error": "falta id"}); return
+            db   = load_db()
             item = db.get(cid)
-            if not item: json_resp(self, 404, {"error": "no encontrado"}); return
-            if "name" in body: item["name"] = str(body["name"]).strip() or "sin-nombre"
+            if not item:
+                json_resp(self, 404, {"error": "no encontrado"}); return
+            if "name" in body:
+                item["name"] = str(body["name"]).strip() or "sin-nombre"
             base_exp = int(item.get("expires_at", now_ts()))
-            base = base_exp if base_exp > now_ts() else now_ts()
-            if "add_days" in body: item["expires_at"] = base + max(int(body["add_days"]), 0) * 86400
-            elif "sub_days" in body: item["expires_at"] = max(0, base_exp - max(int(body["sub_days"]), 0) * 86400)
-            elif "set_days" in body: item["expires_at"] = now_ts() + max(int(body["set_days"]), 0) * 86400
+            base     = base_exp if base_exp > now_ts() else now_ts()
+            if "add_days" in body:
+                item["expires_at"] = base + max(int(body["add_days"]), 0) * 86400
+            elif "sub_days" in body:
+                item["expires_at"] = max(0, base_exp - max(int(body["sub_days"]), 0) * 86400)
+            elif "set_days" in body:
+                item["expires_at"] = now_ts() + max(int(body["set_days"]), 0) * 86400
             new_id = str(body.get("new_id", "")).strip()
             if new_id and new_id != cid:
                 db.pop(cid); db[new_id] = item; cid = new_id
@@ -533,71 +613,88 @@ class Handler(BaseHTTPRequestHandler):
                 db[cid] = item
             save_db(db)
             exp = int(item.get("expires_at", 0))
-            json_resp(self, 200, {"ok": True, "id": cid, "name": item.get("name"), "days_left": days_left(exp)})
-            return
+            json_resp(self, 200, {"ok": True, "id": cid, "name": item.get("name"),
+                "days_left": days_left(exp)}); return
 
         if path == "/ssh/create":
-            user = str(body.get("user", "")).strip()
+            user     = str(body.get("user", "")).strip()
             password = str(body.get("password", "")).strip()
-            name = str(body.get("name", user)).strip() or user
-            days = int(body.get("days", 30))
+            name     = str(body.get("name", user)).strip() or user
+            days     = int(body.get("days", 30))
             if not user or not password:
                 json_resp(self, 400, {"error": "falta user o password"}); return
-            # Crear usuario del sistema con shell restringida
-            import subprocess
-            r = subprocess.run(
-                ["useradd", "-s", "/usr/local/bin/tunnel-only", "-M", user],
-                capture_output=True, text=True
-            )
-            if r.returncode not in (0, 9):  # 9 = ya existe
-                json_resp(self, 500, {"error": f"useradd fallo: {r.stderr.strip()}"}); return
-            # Establecer contraseña
+
+            ensure_tunnel_shell()
+
+            existing = subprocess.run(["id", user], capture_output=True)
+            if existing.returncode != 0:
+                r = subprocess.run(
+                    ["useradd", "-s", TUNNEL_SHELL, "-M", "-p", "!", user],
+                    capture_output=True, text=True
+                )
+                if r.returncode != 0:
+                    json_resp(self, 500, {"error": f"useradd fallo: {r.stderr.strip()}"}); return
+            else:
+                subprocess.run(["usermod", "-s", TUNNEL_SHELL, user], capture_output=True)
+
             p = subprocess.run(
-                ["chpasswd"], input=f"{user}:{password}", capture_output=True, text=True
+                ["chpasswd"],
+                input=f"{user}:{password}",
+                capture_output=True, text=True
             )
             if p.returncode != 0:
                 json_resp(self, 500, {"error": f"chpasswd fallo: {p.stderr.strip()}"}); return
-            db = load_ssh_db()
+
+            db  = load_ssh_db()
             now = now_ts()
             db[user] = {"name": name, "created_at": db.get(user, {}).get("created_at", now),
                 "expires_at": now + max(days, 0) * 86400}
             save_ssh_db(db)
-            json_resp(self, 200, {"ok": True, "user": user, "name": name, "days": days})
-            return
+            json_resp(self, 200, {"ok": True, "user": user, "name": name, "days": days}); return
 
         if path == "/ssh/delete":
             user = str(body.get("user", "")).strip()
-            if not user: json_resp(self, 400, {"error": "falta user"}); return
+            if not user:
+                json_resp(self, 400, {"error": "falta user"}); return
             db = load_ssh_db()
-            if user not in db: json_resp(self, 404, {"error": "no encontrado"}); return
-            import subprocess
+            if user not in db:
+                json_resp(self, 404, {"error": "no encontrado"}); return
             subprocess.run(["userdel", user], capture_output=True)
             db.pop(user); save_ssh_db(db)
-            json_resp(self, 200, {"ok": True})
-            return
+            json_resp(self, 200, {"ok": True}); return
 
         if path == "/ssh/update":
             user = str(body.get("user", "")).strip()
-            if not user: json_resp(self, 400, {"error": "falta user"}); return
-            db = load_ssh_db()
+            if not user:
+                json_resp(self, 400, {"error": "falta user"}); return
+            db   = load_ssh_db()
             item = db.get(user)
-            if not item: json_resp(self, 404, {"error": "no encontrado"}); return
-            if "name" in body: item["name"] = str(body["name"]).strip() or user
+            if not item:
+                json_resp(self, 404, {"error": "no encontrado"}); return
+            if "name" in body:
+                item["name"] = str(body["name"]).strip() or user
+            if "password" in body:
+                new_pass = str(body["password"]).strip()
+                if new_pass:
+                    subprocess.run(["chpasswd"], input=f"{user}:{new_pass}",
+                        capture_output=True, text=True)
             base_exp = int(item.get("expires_at", now_ts()))
-            base = base_exp if base_exp > now_ts() else now_ts()
-            if "add_days" in body: item["expires_at"] = base + max(int(body["add_days"]), 0) * 86400
-            elif "sub_days" in body: item["expires_at"] = max(0, base_exp - max(int(body["sub_days"]), 0) * 86400)
-            elif "set_days" in body: item["expires_at"] = now_ts() + max(int(body["set_days"]), 0) * 86400
+            base     = base_exp if base_exp > now_ts() else now_ts()
+            if "add_days" in body:
+                item["expires_at"] = base + max(int(body["add_days"]), 0) * 86400
+            elif "sub_days" in body:
+                item["expires_at"] = max(0, base_exp - max(int(body["sub_days"]), 0) * 86400)
+            elif "set_days" in body:
+                item["expires_at"] = now_ts() + max(int(body["set_days"]), 0) * 86400
             db[user] = item
             save_ssh_db(db)
             exp = int(item.get("expires_at", 0))
-            json_resp(self, 200, {"ok": True, "user": user, "days_left": days_left(exp)})
-            return
+            json_resp(self, 200, {"ok": True, "user": user, "days_left": days_left(exp)}); return
 
         json_resp(self, 404, {"error": "ruta no encontrada"})
 
 if __name__ == "__main__":
-    print(f"panel api escuchando :{PORT}")
+    print(f"btpanel escuchando :{PORT}")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 PYEOF
 chmod +x /opt/btserver/panel.py
@@ -605,7 +702,7 @@ chmod +x /opt/btserver/panel.py
 cat > /etc/systemd/system/btserver.service << 'SVCEOF'
 [Unit]
 Description=BlackTunnel Server
-After=network.target xray.service
+After=network.target xray.service dropbear.service
 
 [Service]
 ExecStart=/usr/bin/python3 /opt/btserver/btserver.py
@@ -632,10 +729,10 @@ WantedBy=multi-user.target
 SVCEOF
 
 systemctl daemon-reload
-systemctl enable xray btserver btpanel
+systemctl enable xray btserver btpanel dropbear
 
 info "Iniciando servicios..."
-for svc in xray btserver btpanel dropbear; do
+for svc in xray dropbear btserver btpanel; do
     if systemctl restart "$svc" 2>/dev/null; then
         info "  ✓ $svc OK"
     else
@@ -651,4 +748,8 @@ echo ""
 echo "  URL PANEL:  http://${SERVER_IP}:${PANEL_PORT}"
 echo "  TOKEN:      ${PANEL_TOKEN}"
 echo "  BBR: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'no disponible')"
+echo ""
+echo "  Flujo:  cliente:80 → btserver.py"
+echo "            action:ssh    → dropbear 127.0.0.1:2222"
+echo "            action:tunnel → xray     127.0.0.1:10809"
 echo "================================================"
